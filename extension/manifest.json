@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Chrome Debug Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Drives this browser via the Chrome DevTools Protocol, controlled by a local MCP server over WebSocket.",
+  "minimum_chrome_version": "116",
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "permissions": [
     "debugger",
@@ -12,10 +14,15 @@
     "scripting",
     "storage",
     "alarms",
-    "offscreen"
+    "offscreen",
+    "webNavigation"
   ],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "Chrome Debug Bridge"
+  },
+  "options_page": "options.html",
+  "storage": {
+    "managed_schema": "managed_schema.json"
   }
 }
