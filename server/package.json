@@ -1,10 +1,10 @@
 {
-  "name": "better-browser-mcp",
-  "version": "0.5.0",
+  "name": "browser-driver-mcp",
+  "version": "0.6.0",
   "description": "MCP server that drives your real, signed-in browser with Claude in Chrome's tools",
   "type": "module",
   "bin": {
-    "better-browser-mcp": "index.js"
+    "browser-driver-mcp": "index.js"
   },
   "scripts": {
     "start": "node index.js",
@@ -14,5 +14,12 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.24.0"
-  }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darrinm/browser-driver-mcp.git",
+    "directory": "server"
+  },
+  "homepage": "https://github.com/darrinm/browser-driver-mcp#readme"
 }

@@ -11,10 +11,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const HOST_NAME = "com.github.darrinm.better_browser_mcp";
+export const HOST_NAME = "com.github.darrinm.browser_driver_mcp";
 
 export function socketDir() {
-  return process.env.BETTER_BROWSER_MCP_DIR || path.join(os.homedir(), ".better-browser-mcp");
+  return process.env.BROWSER_DRIVER_MCP_DIR || path.join(os.homedir(), ".browser-driver-mcp");
 }
 
 // Create the socket directory with mode 0700 and refuse to use one owned by
