@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browser Driver MCP",
   "version": "0.6.0",
-  "description": "Drives this browser via the Chrome DevTools Protocol for local MCP clients, through a native messaging host.",
+  "description": "Lets your local AI agent drive this browser over MCP, with Claude in Chrome-compatible tools and a Stop button.",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "background.js",
@@ -28,11 +28,12 @@
     "default_title": "Browser Driver MCP",
     "default_icon": {
       "16": "icons/icon16.png",
-      "48": "icons/icon48.png"
+      "32": "icons/icon32.png"
     }
   },
   "icons": {
     "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },

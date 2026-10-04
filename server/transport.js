@@ -13,6 +13,10 @@ import path from "node:path";
 
 export const HOST_NAME = "com.github.darrinm.browser_driver_mcp";
 
+// The extension's ID, here and in the Chrome Web Store (both derive from the
+// public key in extension/manifest.json).
+export const EXTENSION_ID = "epkpbfomlhcfccjlmjnihbllpdhaacaj";
+
 export function socketDir() {
   return process.env.BROWSER_DRIVER_MCP_DIR || path.join(os.homedir(), ".browser-driver-mcp");
 }

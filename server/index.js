@@ -19,6 +19,20 @@ const IMAGE_TTL_MS = 5 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const OUT_DIR = path.join(os.tmpdir(), "browser-driver-mcp");
 
+// CLI subcommands: `browser-driver-mcp install-host` / `uninstall-host`.
+// With no subcommand, run the MCP server on stdio.
+const command = process.argv[2];
+if (command === "install-host" || command === "uninstall-host") {
+  if (command === "uninstall-host") process.argv.push("--uninstall");
+  await import("./install-host.js");
+  process.exit(0);
+}
+if (command === "--version" || command === "-v") {
+  const { version } = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+  console.log(version);
+  process.exit(0);
+}
+
 const bridge = new Bridge();
 
 // ---------------------------------------------------------------------------

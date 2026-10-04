@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOST_NAME } from "./transport.js";
+import { HOST_NAME, EXTENSION_ID } from "./transport.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const home = os.homedir();
@@ -40,13 +40,18 @@ function toId(bytes) {
     .replace(/./g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
 }
 
+// In a repo checkout, read the ID from ../extension; an npm install has no
+// extension folder and uses the published ID.
 const extensionDir = path.resolve(here, "../extension");
-const manifestKey = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8")).key;
+const manifestPath = path.join(extensionDir, "manifest.json");
+const manifestKey = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")).key : undefined;
 const extensionId = idFlag
   ? idFlag.split("=")[1]
   : manifestKey
     ? toId(Buffer.from(manifestKey, "base64"))
-    : toId(extensionDir);
+    : fs.existsSync(manifestPath)
+      ? toId(extensionDir)
+      : EXTENSION_ID;
 
 const browserDirs = (process.platform === "darwin"
   ? [
@@ -137,5 +142,5 @@ for (const dir of browserDirs) {
   console.log(`installed ${file}`);
 }
 console.log(`launcher:     ${launcher}`);
-console.log(`extension ID: ${extensionId} (from ${manifestKey ? "the manifest key" : extensionDir})`);
+console.log(`extension ID: ${extensionId}`);
 console.log("Reload the extension (chrome://extensions) so it connects to the host.");
