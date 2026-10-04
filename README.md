@@ -5,15 +5,19 @@ same tools as Claude in Chrome — same names, same parameters, same behavior �
 so prompts and skills written for Claude in Chrome work unchanged.
 
 ```
-Claude Code ──(MCP over stdio)── server/index.js ──(WebSocket, localhost:9333)── Chrome extension ──(chrome.debugger / CDP)── your tabs
+Claude Code ──MCP/stdio── server/index.js ──Unix socket── native host ──native messaging── extension ──CDP── your tabs
 ```
 
-Two pieces:
+Three pieces:
 
-- **`extension/`** — a Manifest V3 extension. Its service worker connects to the
-  local bridge server and executes commands against tabs using the Chrome
-  DevTools Protocol (`chrome.debugger`) and `chrome.scripting`.
-- **`server/`** — a Node MCP server exposing those commands as tools.
+- **`extension/`** — a Manifest V3 extension. Its service worker executes
+  commands against tabs using the Chrome DevTools Protocol (`chrome.debugger`)
+  and `chrome.scripting`.
+- **`server/native-host.js`** — a native messaging host. The browser launches
+  it when the extension connects, and only this extension may launch it. It
+  exposes the extension on a Unix socket in `~/.chrome-debug-bridge/`.
+- **`server/index.js`** — the MCP server exposing the tools. It finds each
+  connected browser's host socket and relays tool calls to it.
 
 ## Tools
 
@@ -66,16 +70,30 @@ cd server
 npm install
 ```
 
-### 2. Load the extension
+### 2. Register the native host
+
+```sh
+npm run install-host      # in server/
+```
+
+This registers the host with every Chromium-based browser it finds (Chrome,
+Chromium, Brave, Edge, Vivaldi, Arc, and Chrome's beta/dev/canary channels) on
+macOS or Linux, allowing only this extension to launch it. The allowed
+extension ID is computed from the `extension/` folder's path, which is how
+Chrome assigns IDs to unpacked extensions; pass `--extension-id=<id>` if yours
+differs. `npm run uninstall-host` removes it.
+
+### 3. Load the extension
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode** (top right)
 3. Click **Load unpacked** and select the `extension/` folder
 
-The extension connects to `ws://127.0.0.1:9333` and retries with backoff, so
-the order you start things in doesn't matter.
+The extension connects to the host as soon as it loads. If the host isn't
+registered, the toolbar icon shows a red **!** and its tooltip says why; the
+extension keeps retrying, so register the host and reload.
 
-### 3. Register with Claude Code
+### 4. Register with Claude Code
 
 ```sh
 claude mcp add claude-in-chrome -- node /ABSOLUTE/PATH/TO/chrome-dbg-ext/server/index.js
@@ -88,8 +106,8 @@ built-in Chrome integration first (`/chrome`) so the two don't collide — or
 pick any other name if you only need the short names to match.
 
 Any other MCP client works the same way — point it at `node server/index.js`
-over stdio. Set `BRIDGE_PORT` to change the WebSocket port (both sides; the
-extension's port is the `BRIDGE_URL` constant in `extension/background.js`).
+over stdio. Several MCP servers (say, several Claude sessions) can use the
+same browser at once; the host routes each response back to its caller.
 
 ## Staying in control
 
@@ -104,8 +122,24 @@ extension's port is the `BRIDGE_URL` constant in `extension/background.js`).
 - **The tab group is the boundary.** Your other tabs are never touched.
 - **The extension's own pages are off limits**, since they run with extension
   privileges.
+- **No network listener.** The extension talks only to its native host, which
+  only it can launch (the host manifest's `allowed_origins`). The host listens
+  on a Unix socket inside `~/.chrome-debug-bridge/` (mode 0700, socket 0600),
+  so web pages can't reach it, other users can't, and there's no TCP port for
+  another program to squat on.
 
 ## How it works
+
+- **Transport.** The browser launches `native-host.js` on
+  `chrome.runtime.connectNative` and exchanges length-prefixed JSON with it
+  over stdio. The host listens on `~/.chrome-debug-bridge/<pid>.sock`; MCP
+  servers watch that directory and connect to every socket in it, one per
+  connected browser. The host rewrites request ids so several clients can
+  share it, and replays the extension's `hello` (device ID, browser name) to
+  each client. Chrome caps host→extension messages at 1 MB, so the host splits
+  larger ones (GIF frames, say) into chunks the extension reassembles. The host
+  exits and removes its socket when the browser closes the port; clients
+  remove sockets left behind by a host that crashed.
 
 - **Attach on demand.** The first command touching a tab runs
   `chrome.debugger.attach` and enables the `Runtime`, `Page`, `Network`, and
@@ -159,9 +193,11 @@ extension's port is the `BRIDGE_URL` constant in `extension/background.js`).
 
 ## Development
 
-`server/cli.js` is a dev harness: it hosts the extension's WebSocket and an
-HTTP control endpoint on port 9334, so you can call extension methods with
-curl. `extension.reload` reloads the unpacked extension from disk:
+`server/cli.js` is a dev harness: it connects to the host like the MCP server
+does and serves an HTTP control endpoint on `127.0.0.1:9334`, so you can call
+extension methods with curl. It refuses requests that carry an `Origin`
+header, so web pages can't use it. `extension.reload` reloads the unpacked
+extension from disk:
 
 ```sh
 node server/cli.js &
@@ -178,8 +214,8 @@ Starting the MCP server with `BRIDGE_DEV=1` adds `dev_call` and
   driving it, and vice versa.
 - `chrome.debugger` can't attach to `chrome://` pages or the Web Store.
 - `file_upload` can't reach file inputs inside cross-origin iframes.
-- The WebSocket server binds to `127.0.0.1` only, but any local process (or
-  web page) could connect to it, and anything listening on port 9333 when the
-  server isn't running can drive the extension. For anything beyond personal
-  use, check the `Origin` header and add a shared secret, or move to native
-  messaging.
+- Any program running as your user can connect to the host's socket — the
+  same trust boundary as the rest of your user account (and as Claude in
+  Chrome's own native host).
+- Native host registration is automated for macOS and Linux only; Windows
+  registers hosts in the registry.
