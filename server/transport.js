@@ -11,10 +11,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const HOST_NAME = "com.github.darrinm.chrome_debug_bridge";
+export const HOST_NAME = "com.github.darrinm.better_browser_mcp";
 
 export function socketDir() {
-  return process.env.CHROME_DEBUG_BRIDGE_DIR || path.join(os.homedir(), ".chrome-debug-bridge");
+  return process.env.BETTER_BROWSER_MCP_DIR || path.join(os.homedir(), ".better-browser-mcp");
 }
 
 // Create the socket directory with mode 0700 and refuse to use one owned by

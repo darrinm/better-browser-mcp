@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Dev harness for the Chrome Debug Bridge: connects to the browser's native
+// Dev harness for the Better Browser MCP: connects to the browser's native
 // host like the MCP server does, and serves an HTTP control endpoint on 9334
 // so extension methods can be called with curl:
 //

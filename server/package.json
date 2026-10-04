@@ -1,10 +1,10 @@
 {
-  "name": "chrome-debug-bridge-server",
-  "version": "0.4.0",
-  "description": "MCP server that drives Chrome through the Chrome Debug Bridge extension",
+  "name": "better-browser-mcp",
+  "version": "0.5.0",
+  "description": "MCP server that drives your real, signed-in browser with Claude in Chrome's tools",
   "type": "module",
   "bin": {
-    "chrome-debug-bridge": "index.js"
+    "better-browser-mcp": "index.js"
   },
   "scripts": {
     "start": "node index.js",
