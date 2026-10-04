@@ -1,4 +1,4 @@
-# Chrome Debug Bridge
+# Better Browser MCP
 
 Drive your own Chrome browser from an AI agent (or any MCP client) with the
 same tools as Claude in Chrome — same names, same parameters, same behavior —
@@ -15,7 +15,7 @@ Three pieces:
   and `chrome.scripting`.
 - **`server/native-host.js`** — a native messaging host. The browser launches
   it when the extension connects, and only this extension may launch it. It
-  exposes the extension on a Unix socket in `~/.chrome-debug-bridge/`.
+  exposes the extension on a Unix socket in `~/.better-browser-mcp/`.
 - **`server/index.js`** — the MCP server exposing the tools. It finds each
   connected browser's host socket and relays tool calls to it.
 
@@ -96,7 +96,7 @@ extension keeps retrying, so register the host and reload.
 ### 4. Register with Claude Code
 
 ```sh
-claude mcp add claude-in-chrome -- node /ABSOLUTE/PATH/TO/chrome-dbg-ext/server/index.js
+claude mcp add claude-in-chrome -- node /ABSOLUTE/PATH/TO/better-browser-mcp/server/index.js
 ```
 
 Naming the server `claude-in-chrome` makes the full tool names
@@ -124,7 +124,7 @@ same browser at once; the host routes each response back to its caller.
   privileges.
 - **No network listener.** The extension talks only to its native host, which
   only it can launch (the host manifest's `allowed_origins`). The host listens
-  on a Unix socket inside `~/.chrome-debug-bridge/` (mode 0700, socket 0600),
+  on a Unix socket inside `~/.better-browser-mcp/` (mode 0700, socket 0600),
   so web pages can't reach it, other users can't, and there's no TCP port for
   another program to squat on.
 
@@ -132,7 +132,7 @@ same browser at once; the host routes each response back to its caller.
 
 - **Transport.** The browser launches `native-host.js` on
   `chrome.runtime.connectNative` and exchanges length-prefixed JSON with it
-  over stdio. The host listens on `~/.chrome-debug-bridge/<pid>.sock`; MCP
+  over stdio. The host listens on `~/.better-browser-mcp/<pid>.sock`; MCP
   servers watch that directory and connect to every socket in it, one per
   connected browser. The host rewrites request ids so several clients can
   share it, and replays the extension's `hello` (device ID, browser name) to

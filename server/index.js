@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MCP server for the Chrome Debug Bridge extension.
+// MCP server for the Better Browser MCP extension.
 //
 // Exposes the same tools, with the same names and parameters, as Claude in
 // Chrome, so prompts and skills written for it work unchanged. Speaks MCP over
@@ -17,7 +17,7 @@ import path from "node:path";
 
 const IMAGE_TTL_MS = 5 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-const OUT_DIR = path.join(os.tmpdir(), "chrome-debug-bridge");
+const OUT_DIR = path.join(os.tmpdir(), "better-browser-mcp");
 
 const bridge = new Bridge();
 
@@ -375,7 +375,7 @@ const impl = {
 // Chrome's tools.
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: "chrome-debug-bridge", version: "0.3.0" });
+const server = new McpServer({ name: "better-browser-mcp", version: "0.5.0" });
 
 const TAB = "Must be a tab in the current group. Use tabs_context_mcp first if you don't have a valid tab ID.";
 const NO_TAB = "If you don't have a valid tab ID, use tabs_context_mcp first to get available tabs.";
@@ -775,4 +775,4 @@ if (process.env.BRIDGE_DEV) {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`chrome-debug-bridge: MCP on stdio, browsers via native hosts in ${bridge.dir}`);
+console.error(`better-browser-mcp: MCP on stdio, browsers via native hosts in ${bridge.dir}`);

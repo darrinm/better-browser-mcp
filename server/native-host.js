@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Native messaging host for the Chrome Debug Bridge extension.
+// Native messaging host for the Better Browser MCP extension.
 //
 // The browser starts this process when the extension calls
 // chrome.runtime.connectNative, and only the extension IDs listed in the host

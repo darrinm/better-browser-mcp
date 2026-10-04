@@ -53,8 +53,8 @@ const browserDirs = (process.platform === "darwin"
 ).filter((d) => fs.existsSync(d));
 
 const dataDir = process.platform === "darwin"
-  ? path.join(home, "Library/Application Support/chrome-debug-bridge")
-  : path.join(home, ".local/share/chrome-debug-bridge");
+  ? path.join(home, "Library/Application Support/better-browser-mcp")
+  : path.join(home, ".local/share/better-browser-mcp");
 const launcher = path.join(dataDir, "native-host");
 
 // Browsers launch hosts with a minimal PATH, so the launcher names node by
@@ -69,6 +69,26 @@ function findNode() {
     } catch {}
   }
   return process.execPath;
+}
+
+// Earlier versions of this project registered under another name; clean
+// those up on install and uninstall alike.
+const LEGACY_HOST_NAMES = ["com.github.darrinm.chrome_debug_bridge"];
+const legacyDataDirs = ["chrome-debug-bridge"].map((name) => path.join(path.dirname(dataDir), name));
+for (const dir of browserDirs) {
+  for (const name of LEGACY_HOST_NAMES) {
+    const file = path.join(dir, "NativeMessagingHosts", `${name}.json`);
+    if (fs.existsSync(file)) {
+      fs.unlinkSync(file);
+      console.log(`removed legacy ${file}`);
+    }
+  }
+}
+for (const dir of legacyDataDirs) {
+  if (fs.existsSync(dir)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log(`removed legacy ${dir}`);
+  }
 }
 
 if (uninstall) {
@@ -95,7 +115,7 @@ fs.writeFileSync(
 
 const manifest = {
   name: HOST_NAME,
-  description: "Chrome Debug Bridge native host",
+  description: "Better Browser MCP native host",
   path: launcher,
   type: "stdio",
   allowed_origins: [`chrome-extension://${extensionId}/`],

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Chrome Debug Bridge",
-  "version": "0.4.0",
+  "name": "Better Browser MCP",
+  "version": "0.5.0",
   "description": "Drives this browser via the Chrome DevTools Protocol for local MCP clients, through a native messaging host.",
   "minimum_chrome_version": "116",
   "background": {
@@ -25,7 +25,7 @@
     "<all_urls>"
   ],
   "action": {
-    "default_title": "Chrome Debug Bridge",
+    "default_title": "Better Browser MCP",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
