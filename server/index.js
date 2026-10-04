@@ -703,10 +703,10 @@ tool(
     filename: z.string().optional().describe("Optional filename for exported GIF (default: 'recording-[timestamp].gif'). For 'export' action only."),
     coordinate: z.array(z.number()).optional().describe("Viewport coordinates [x, y] to drag & drop the exported GIF onto. For 'export' action only."),
     options: z.object({
-      showClickIndicators: z.boolean().optional().describe("Show orange circles at click locations (default: true)"),
+      showClickIndicators: z.boolean().optional().describe("Show blue circles at click locations (default: true)"),
       showDragPaths: z.boolean().optional().describe("Show red arrows for drag actions (default: true)"),
       showActionLabels: z.boolean().optional().describe("Show black labels describing actions (default: true)"),
-      showProgressBar: z.boolean().optional().describe("Show orange progress bar at bottom (default: true)"),
+      showProgressBar: z.boolean().optional().describe("Show blue progress bar at bottom (default: true)"),
       showWatermark: z.boolean().optional().describe("Show a logo watermark (default: true)"),
       quality: z.number().optional().describe("GIF compression quality, 1-30 (lower = better quality, slower encoding). Default: 10"),
     }).optional().describe("Optional GIF enhancement options for 'export' action. All default to true except quality (default: 10)."),
