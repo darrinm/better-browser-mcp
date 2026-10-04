@@ -4,7 +4,7 @@
 
 import { GIFEncoder, quantize, applyPalette } from "./vendor/gifenc.esm.js";
 
-const ORANGE = "#d97757";
+const BLUE = "#00aaff"; // the same electric blue as the page glow
 const MAX_WIDTH = 800;
 
 export function base64ToBytes(b64) {
@@ -62,7 +62,7 @@ export async function encodeGif(frames, options = {}) {
     if (a && o.showClickIndicators && a.coordinate && /click|drag/.test(a.type)) drawClick(ctx, pt(a.coordinate));
     if (a && o.showActionLabels && a.label) drawLabel(ctx, a.label, width);
     if (o.showProgressBar) {
-      ctx.fillStyle = ORANGE;
+      ctx.fillStyle = BLUE;
       ctx.fillRect(0, height - 4, (width * (i + 1)) / frames.length, 4);
     }
     if (o.showWatermark) drawWatermark(ctx, width, height);
@@ -79,8 +79,8 @@ export async function encodeGif(frames, options = {}) {
 function drawClick(ctx, [x, y]) {
   ctx.save();
   ctx.lineWidth = 3;
-  ctx.strokeStyle = ORANGE;
-  ctx.fillStyle = "rgba(217,119,87,0.25)";
+  ctx.strokeStyle = BLUE;
+  ctx.fillStyle = "rgba(0,170,255,0.25)";
   ctx.beginPath();
   ctx.arc(x, y, 14, 0, Math.PI * 2);
   ctx.fill();
@@ -129,7 +129,7 @@ function drawWatermark(ctx, width, height) {
   const y = height - s - 12;
   ctx.save();
   ctx.globalAlpha = 0.85;
-  ctx.fillStyle = ORANGE;
+  ctx.fillStyle = BLUE;
   roundRect(ctx, x, y, s, s, 5);
   ctx.fill();
   ctx.strokeStyle = "#fff";

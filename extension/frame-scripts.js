@@ -384,9 +384,9 @@ export function installIndicator() {
     @keyframes pulse { 50% { opacity: .55; } }
     button { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
       pointer-events: auto; font: 600 13px/1 system-ui, sans-serif; color: #fff;
-      background: #b8441f; border: 0; border-radius: 999px; padding: 9px 16px;
+      background: #00aaff; border: 0; border-radius: 999px; padding: 9px 16px;
       box-shadow: 0 2px 10px rgba(0,0,0,.3); cursor: pointer; }
-    button:hover { background: #8f3418; }
+    button:hover { background: #0090dd; }
   </style><div class="glow"></div><button type="button">&#9632; Stop automation</button>`;
   root.querySelector("button").addEventListener("click", (e) => {
     e.stopPropagation();
