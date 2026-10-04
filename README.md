@@ -63,17 +63,20 @@ there's no domain blocklist; shortcuts aren't available.
 
 ## Install
 
-Once the extension is published:
-
-1. Install **Browser Driver MCP** from the Chrome Web Store.
-2. Install the server and register its native host with your browsers:
+1. Install **Browser Driver MCP** from the Chrome Web Store. It opens a setup
+   page with live status and the exact line for your MCP client (click the
+   toolbar icon to get back to it).
+2. Add the server to your MCP client, e.g. for Claude Code:
 
    ```sh
-   npm install -g browser-driver-mcp
-   browser-driver-mcp install-host
+   claude mcp add browser-driver -- npx -y browser-driver-mcp
    ```
 
-3. Add it to your MCP client, e.g. `claude mcp add browser-driver -- browser-driver-mcp`.
+That's it: the first time the server starts, it installs and registers its
+native messaging host (and repairs it on every later start), and the
+extension connects within a few seconds. If something's off,
+`npx -y browser-driver-mcp doctor` checks each link in the chain and says how
+to fix it.
 
 To run from a checkout instead, follow the setup below.
 
@@ -86,18 +89,17 @@ cd server
 npm install
 ```
 
-### 2. Register the native host
+### 2. The native host
 
-```sh
-npm run install-host      # in server/
-```
-
-This registers the host with every Chromium-based browser it finds (Chrome,
-Chromium, Brave, Edge, Vivaldi, Arc, and Chrome's beta/dev/canary channels) on
-macOS or Linux, allowing only this extension to launch it. The manifest
-carries a fixed `key`, so the extension's ID (`epkpbfomlhcfccjlmjnihbllpdhaacaj`)
-is the same wherever the folder lives; pass `--extension-id=<id>` to allow a
-different one. `npm run uninstall-host` removes it.
+The MCP server installs it on every start, so there's nothing to do. It copies
+the host into `~/Library/Application Support/browser-driver-mcp` (or
+`~/.local/share/browser-driver-mcp` on Linux) and registers it with every
+Chromium-based browser it finds (Chrome, Chromium, Brave, Edge, Vivaldi, Arc,
+and Chrome's beta/dev/canary channels), allowing only this extension to launch
+it. The manifest carries a fixed `key`, so the extension's ID
+(`epkpbfomlhcfccjlmjnihbllpdhaacaj`) is the same wherever the folder lives.
+`npm run install-host` does the same by hand (`--extension-id=<id>` allows
+another ID); `npm run uninstall-host` removes it.
 
 ### 3. Load the extension
 

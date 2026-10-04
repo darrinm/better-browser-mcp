@@ -62,10 +62,18 @@ async function identity() {
   return { deviceId, name: brand, platform };
 }
 
-// The native messaging host (server/native-host.js), registered by
-// install-host.js. Chrome launches it on connectNative and only lets the
-// extension IDs in its manifest connect.
+// The native messaging host (server/native-host.js), which the MCP server
+// installs and registers. Chrome launches it on connectNative and only lets
+// the extension IDs in its manifest connect.
 const HOST_NAME = "com.github.darrinm.browser_driver_mcp";
+
+// Version of the extension <-> server message protocol; must match PROTOCOL
+// in server/transport.js. Bump both on incompatible changes.
+const PROTOCOL = 1;
+
+// What the welcome page shows: whether the host is reachable, and how many
+// MCP clients are attached to it.
+const hostStatus = { connected: false, error: null, version: null, clients: 0 };
 
 let port = null;
 let reconnectTimer = null;
@@ -88,10 +96,11 @@ function connect() {
   p.onDisconnect.addListener(() => {
     const reason = chrome.runtime.lastError ? chrome.runtime.lastError.message : "the native host exited";
     if (port === p) port = null;
+    Object.assign(hostStatus, { connected: false, error: reason, clients: 0 });
     showHostProblem(reason);
     scheduleReconnect();
   });
-  identity().then((id) => send({ event: "hello", version: chrome.runtime.getManifest().version, ...id }));
+  identity().then((id) => send({ event: "hello", version: chrome.runtime.getManifest().version, protocol: PROTOCOL, ...id }));
 }
 
 function scheduleReconnect() {
@@ -112,7 +121,12 @@ async function onHostMessage(msg) {
   }
   if (msg.event === "ready") {
     reconnectDelay = 1000;
+    Object.assign(hostStatus, { connected: true, error: null, version: msg.version || null });
     clearHostProblem();
+    return;
+  }
+  if (msg.event === "clients") {
+    hostStatus.clients = msg.count;
     return;
   }
   if (msg.id === undefined || !msg.method) return;
@@ -138,8 +152,7 @@ function showHostProblem(reason) {
   chrome.action.setBadgeBackgroundColor({ color: "#c0392b" }).catch(() => {});
   chrome.action.setBadgeText({ text: "!" }).catch(() => {});
   chrome.action.setTitle({
-    title: `Browser Driver MCP: can't reach the native host (${reason}). ` +
-      "Run `npm run install-host` in the server folder, then reload the extension.",
+    title: `Browser Driver MCP isn't connected yet (${reason}). Click for setup help.`,
   }).catch(() => {});
 }
 
@@ -165,13 +178,26 @@ async function ensureKeepalive() {
   }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
   if (msg.keepalive) {
     send({ ping: Date.now() });
     connect();
   } else if (msg.stopAutomation && sender.tab) {
     stopTab(sender.tab.id);
+  } else if (msg.type === "status" && sender.id === chrome.runtime.id && !sender.tab?.url?.startsWith("http")) {
+    // From the welcome page: report status, and retry the host right away
+    // rather than waiting out the backoff, so setup feels instant.
+    if (!port) {
+      reconnectDelay = 1000;
+      connect();
+    }
+    sendResponse({
+      ...hostStatus,
+      extensionVersion: chrome.runtime.getManifest().version,
+      protocol: PROTOCOL,
+      extensionId: chrome.runtime.id,
+    });
   }
 });
 
@@ -183,8 +209,23 @@ function startup() {
 chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === "bridge-reconnect") startup(); });
 chrome.runtime.onStartup.addListener(startup);
-chrome.runtime.onInstalled.addListener(startup);
+chrome.runtime.onInstalled.addListener((details) => {
+  startup();
+  if (details.reason === "install") openWelcome();
+});
 startup();
+
+// The setup/status page: opened on install and from the toolbar icon.
+async function openWelcome() {
+  const url = chrome.runtime.getURL("welcome.html");
+  const [existing] = await chrome.tabs.query({ url });
+  if (existing) {
+    await chrome.tabs.update(existing.id, { active: true });
+    await chrome.windows.update(existing.windowId, { focused: true });
+  } else {
+    await chrome.tabs.create({ url });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Browser pairing (switch_browser)
@@ -216,9 +257,13 @@ async function stopTab(tabId) {
   chrome.action.setTitle({ tabId, title: "Automation stopped — click to allow it again on this tab" }).catch(() => {});
 }
 
-// Clicking the toolbar icon on a stopped tab allows automation there again.
+// Clicking the toolbar icon on a stopped tab allows automation there again;
+// anywhere else it opens the setup/status page.
 chrome.action.onClicked.addListener(async (tab) => {
-  if (!stoppedTabs.delete(tab.id)) return;
+  if (!stoppedTabs.delete(tab.id)) {
+    openWelcome();
+    return;
+  }
   await saveStopped();
   chrome.action.setBadgeText({ tabId: tab.id, text: "" }).catch(() => {});
   chrome.action.setTitle({ tabId: tab.id, title: "Browser Driver MCP" }).catch(() => {});

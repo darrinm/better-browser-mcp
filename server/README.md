@@ -9,25 +9,22 @@ and a native messaging host. No ports are opened.
 
 1. Install the **Browser Driver MCP** extension from the Chrome Web Store
    (or load `extension/` from the repo unpacked).
-2. Install this package and register the native host with your browsers:
+2. Add the MCP server to your client, e.g. Claude Code:
 
    ```sh
-   npm install -g browser-driver-mcp
-   browser-driver-mcp install-host
+   claude mcp add browser-driver -- npx -y browser-driver-mcp
    ```
 
-3. Add the MCP server to your client, e.g. Claude Code:
-
-   ```sh
-   claude mcp add browser-driver -- browser-driver-mcp
-   ```
+   On its first start the server installs and registers the native messaging
+   host the extension talks to, and repairs it on every later start.
 
    Name it `claude-in-chrome` instead if you want full tool names
    (`mcp__claude-in-chrome__computer`, …) to match Claude in Chrome's, and turn
    off Claude Code's built-in Chrome integration so the two don't collide.
 
-`browser-driver-mcp uninstall-host` removes the host registration. macOS and
-Linux are supported.
+Commands: `browser-driver-mcp doctor` checks every step of the setup and says
+how to fix problems; `install-host` / `uninstall-host` install or remove the
+native host explicitly. macOS and Linux are supported.
 
 Full documentation: https://github.com/darrinm/browser-driver-mcp
 

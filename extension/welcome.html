@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser Driver MCP — Setup</title>
+<style>
+  :root {
+    --bg: #f6f8fb; --card: #ffffff; --text: #18202b; --muted: #5c6878; --line: #e2e7ee;
+    --accent: #00aaff; --accent-ink: #0077c2; --ok: #16a34a; --wait: #b7791f; --bad: #c0392b; --code: #f0f4f8;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1119; --card: #121a25; --text: #e6edf5; --muted: #93a2b5; --line: #223042;
+      --accent: #33bbff; --accent-ink: #66ccff; --ok: #4ade80; --wait: #f0b458; --bad: #f87171; --code: #0d141d;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+  header { display: flex; align-items: center; gap: 14px; }
+  header img { width: 44px; height: 44px; }
+  h1 { font-size: 26px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  .lede { color: var(--muted); margin: 8px 0 28px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; margin-bottom: 18px; }
+  .status { display: grid; gap: 12px; }
+  .row { display: flex; gap: 12px; align-items: flex-start; }
+  .dot { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; color: #fff; margin-top: 1px; }
+  .dot.ok { background: var(--ok); } .dot.wait { background: var(--wait); } .dot.bad { background: var(--bad); }
+  .row b { display: block; }
+  .row span { color: var(--muted); font-size: 14px; }
+  .banner { border-radius: 10px; padding: 12px 14px; margin-top: 16px; font-weight: 600;
+    background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent); }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .tabs button { font: inherit; font-size: 14px; border: 1px solid var(--line); background: transparent; color: var(--text);
+    padding: 6px 12px; border-radius: 999px; cursor: pointer; }
+  .tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .snippet { position: relative; }
+  pre { margin: 0; background: var(--code); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; padding-right: 76px;
+    overflow-x: auto; font: 13px/1.5 "SF Mono", Menlo, Consolas, monospace; white-space: pre; }
+  .copy { position: absolute; top: 8px; right: 8px; font: 600 12px -apple-system, system-ui, sans-serif; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); border-radius: 8px; padding: 5px 10px; cursor: pointer; }
+  .note { color: var(--muted); font-size: 14px; margin: 10px 0 0; }
+  code { font: 13px "SF Mono", Menlo, Consolas, monospace; background: var(--code); padding: 1px 5px; border-radius: 5px; }
+  a { color: var(--accent-ink); }
+  footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icons/icon128.png" alt="">
+    <h1>Browser Driver MCP</h1>
+  </header>
+  <p class="lede">Let an AI agent on your computer drive this browser — with the same tools as Claude in Chrome. Two steps: this extension, and one line in your MCP client.</p>
+
+  <section class="card" aria-live="polite">
+    <h2>Status</h2>
+    <div class="status">
+      <div class="row"><div class="dot ok">✓</div><div><b>Extension installed</b><span id="ext-detail"></span></div></div>
+      <div class="row"><div class="dot wait" id="host-dot">…</div><div><b id="host-title">Checking the connector…</b><span id="host-detail"></span></div></div>
+      <div class="row"><div class="dot wait" id="client-dot">…</div><div><b id="client-title">MCP client</b><span id="client-detail"></span></div></div>
+    </div>
+    <div class="banner" id="done" hidden>You're all set. Try asking your agent: “Open example.com and take a screenshot.”</div>
+  </section>
+
+  <section class="card">
+    <h2>Add it to your MCP client</h2>
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="snippet"><pre id="snippet"></pre><button class="copy" id="copy" type="button">Copy</button></div>
+    <p class="note" id="snippet-note"></p>
+    <p class="note">The first time your client starts the server, it installs the small connector this extension talks to (no admin rights, no open ports). Requires <a href="https://nodejs.org" target="_blank" rel="noopener">Node.js</a> 18 or newer.</p>
+  </section>
+
+  <section class="card">
+    <h2>Good to know</h2>
+    <p class="note" style="margin-top:0">The agent only works in tabs inside the <b>MCP</b> tab group. Pages it drives glow blue and show a <b>Stop automation</b> button. Click this extension's toolbar icon any time to come back here.</p>
+    <p class="note">Something not working? Run <code>npx -y browser-driver-mcp doctor</code> — it checks every step and says how to fix it.</p>
+  </section>
+
+  <footer>Open source (MIT) · <a href="https://github.com/darrinm/browser-driver-mcp" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/darrinm/browser-driver-mcp/blob/main/PRIVACY.md" target="_blank" rel="noopener">Privacy</a> · Not affiliated with Google or Anthropic.</footer>
+</main>
+<script src="welcome.js"></script>
+</body>
+</html>

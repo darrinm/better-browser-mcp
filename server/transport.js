@@ -17,6 +17,21 @@ export const HOST_NAME = "com.github.darrinm.browser_driver_mcp";
 // public key in extension/manifest.json).
 export const EXTENSION_ID = "epkpbfomlhcfccjlmjnihbllpdhaacaj";
 
+// Version of the extension <-> server message protocol. Bump it (here and in
+// extension/background.js) on incompatible changes; mismatches are reported
+// instead of failing mysteriously.
+export const PROTOCOL = 1;
+
+// This package's version, read from the package.json next to this file (the
+// copied native host gets its own small package.json).
+export const VERSION = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+  } catch {
+    return "unknown";
+  }
+})();
+
 export function socketDir() {
   return process.env.BROWSER_DRIVER_MCP_DIR || path.join(os.homedir(), ".browser-driver-mcp");
 }

@@ -1,6 +1,6 @@
 {
   "name": "browser-driver-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server for your real, signed-in browser, with Claude in Chrome-compatible tools",
   "type": "module",
   "bin": {
@@ -27,7 +27,9 @@
     "bridge.js",
     "transport.js",
     "native-host.js",
+    "host-install.js",
     "install-host.js",
+    "doctor.js",
     "README.md"
   ],
   "keywords": [

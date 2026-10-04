@@ -5,12 +5,14 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import crypto from "node:crypto";
-import { socketDir, ensureSocketDir, onLines, writeLine } from "./transport.js";
+import { socketDir, ensureSocketDir, onLines, writeLine, PROTOCOL } from "./transport.js";
 
 const REQUEST_TIMEOUT_MS = 60000;
+const PROTOCOL_EXEMPT = new Set(["extension.reload"]);
 
 export class Bridge {
-  constructor() {
+  constructor({ diagnose = () => "" } = {}) {
+    this.diagnose = diagnose;
     this.dir = ensureSocketDir();
     this.conns = new Map(); // socket path -> { socket, info }
     this.selected = null; // deviceId chosen with select_browser / switch_browser
@@ -69,6 +71,7 @@ export class Bridge {
         name: msg.name,
         platform: msg.platform,
         version: msg.version,
+        protocol: msg.protocol, // undefined from extensions older than the check
       };
       return;
     }
@@ -99,7 +102,24 @@ export class Bridge {
     return this.entries().find((e) => e.info.deviceId === deviceId);
   }
 
-  target() {
+  target(method) {
+    const target = this.pick();
+    const protocol = target.info.protocol ?? 0;
+    // Reloading the extension is how a mismatch gets fixed during
+    // development, so it's always allowed through.
+    if (protocol !== PROTOCOL && !PROTOCOL_EXEMPT.has(method)) {
+      throw new Error(
+        `The ${target.info.name} extension (version ${target.info.version}) speaks protocol ${protocol}, but this ` +
+        `server speaks protocol ${PROTOCOL}. ` +
+        (protocol < PROTOCOL
+          ? "Update the Browser Driver MCP extension (chrome://extensions → Update, or reinstall from the Chrome Web Store)."
+          : "Update this server: npm install -g browser-driver-mcp@latest, or use npx -y browser-driver-mcp@latest.")
+      );
+    }
+    return target;
+  }
+
+  pick() {
     const all = this.entries();
     if (this.selected) {
       const chosen = this.find(this.selected);
@@ -107,10 +127,12 @@ export class Bridge {
     }
     if (all.length === 1) return all[0];
     if (!all.length) {
-      throw new Error(
-        "No browser is connected. Make sure Chrome is running with the Browser Driver MCP extension loaded, " +
-        "and that the native host is installed (npm run install-host in the server folder)."
-      );
+      // Explain what's missing rather than just saying "not connected".
+      let why = "";
+      try {
+        why = " " + this.diagnose();
+      } catch {}
+      throw new Error(`No browser is connected.${why}`);
     }
     throw new Error(
       "Several browsers are connected and none is selected. Use list_connected_browsers, ask the user " +
@@ -133,7 +155,7 @@ export class Bridge {
   call(method, params = {}) {
     let target;
     try {
-      target = this.target();
+      target = this.target(method);
     } catch (err) {
       return Promise.reject(err);
     }

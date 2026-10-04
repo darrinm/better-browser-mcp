@@ -38,10 +38,9 @@ WORKS WHERE OTHERS DON'T
 • Handles alert/confirm dialogs so automation never gets stuck.
 
 SETUP
-This extension needs its free companion helper:
-  npm install -g browser-driver-mcp
-  browser-driver-mcp install-host
-then add "browser-driver-mcp" as an MCP server in your client. Full instructions: https://github.com/darrinm/browser-driver-mcp
+After installing, a setup page shows live status and the one line to add to your MCP client, e.g. for Claude Code:
+  claude mcp add browser-driver -- npx -y browser-driver-mcp
+The server sets up its connector to this extension automatically the first time it runs (requires Node.js 18+). Full instructions: https://github.com/darrinm/browser-driver-mcp
 
 Open source (MIT). Independent project; not affiliated with Google or Anthropic.
 ```
@@ -104,8 +103,8 @@ Leave unchecked: personally identifiable information, health, financial and paym
 ## Review notes (Test instructions field)
 
 ```
-This extension requires its companion native messaging host to do anything:
-  npm install -g browser-driver-mcp && browser-driver-mcp install-host
-Then run any MCP client (e.g. `claude mcp add browser-driver -- browser-driver-mcp` in Claude Code) and ask it to open a page and take a screenshot. Without the host, the toolbar icon shows a red "!" explaining how to install it.
+This extension works with its companion MCP server, which installs the native messaging host automatically on first run:
+  claude mcp add browser-driver -- npx -y browser-driver-mcp   (Claude Code; any MCP client works)
+Then ask the agent to open a page and take a screenshot. On install the extension opens a setup page with live connection status; without the server it shows a red "!" on its icon, and clicking the icon reopens the setup page.
 The debugger permission is the core automation mechanism (CDP Input/Page/Runtime domains) and is only attached to tabs in the extension's "MCP" tab group; an on-page Stop button detaches it.
 ```

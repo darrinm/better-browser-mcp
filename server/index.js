@@ -10,6 +10,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { Bridge } from "./bridge.js";
+import { ensureHost } from "./host-install.js";
+import { VERSION } from "./transport.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -27,13 +29,29 @@ if (command === "install-host" || command === "uninstall-host") {
   await import("./install-host.js");
   process.exit(0);
 }
+if (command === "doctor") {
+  const { runDoctor } = await import("./doctor.js");
+  process.exit(await runDoctor());
+}
 if (command === "--version" || command === "-v") {
-  const { version } = JSON.parse(fs.readFileSync(new URL("./package.json", import.meta.url), "utf8"));
-  console.log(version);
+  console.log(VERSION);
   process.exit(0);
 }
+if (command && command !== "serve") {
+  console.error("Usage: browser-driver-mcp [serve | install-host | uninstall-host | doctor | --version]");
+  process.exit(2);
+}
 
-const bridge = new Bridge();
+// Install or repair the native host on every start, so setup is just
+// "install the extension, add this server to your MCP client".
+try {
+  for (const change of ensureHost()) console.error(`browser-driver-mcp: ${change}`);
+} catch (err) {
+  console.error(`browser-driver-mcp: couldn't install the native host: ${err.message}`);
+}
+
+const { diagnose } = await import("./doctor.js");
+const bridge = new Bridge({ diagnose });
 
 // ---------------------------------------------------------------------------
 // Session state: screenshots (for upload_image) and GIF recording
@@ -361,6 +379,7 @@ const impl = {
       deviceId: b.deviceId,
       name: b.name,
       platform: b.platform,
+      extensionVersion: b.version,
       isLocal: true, // hosts are reached over local Unix sockets
       onThisComputer: true,
       inUse: bridge.selected ? b.deviceId === bridge.selected : bridge.entries().length === 1,
@@ -389,7 +408,7 @@ const impl = {
 // Chrome's tools.
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({ name: "browser-driver-mcp", version: "0.6.0" });
+const server = new McpServer({ name: "browser-driver-mcp", version: VERSION });
 
 const TAB = "Must be a tab in the current group. Use tabs_context_mcp first if you don't have a valid tab ID.";
 const NO_TAB = "If you don't have a valid tab ID, use tabs_context_mcp first to get available tabs.";
