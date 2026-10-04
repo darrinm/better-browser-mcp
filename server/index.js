@@ -125,11 +125,16 @@ tool(
 
 tool(
   "screenshot",
-  "Capture a screenshot of the tab's visible viewport. Returns a PNG image.",
-  { tabId },
+  "Capture a screenshot of the tab's visible viewport. JPEG by default (cheaper); pass format='png' " +
+    "for lossless UI detail.",
+  {
+    tabId,
+    format: z.enum(["jpeg", "png"]).optional(),
+    quality: z.number().int().min(1).max(100).optional().describe("JPEG quality (default 80)"),
+  },
   async (args) => {
-    const { base64 } = await bridge.call("page.screenshot", args);
-    return { content: [{ type: "image", data: base64, mimeType: "image/png" }] };
+    const { base64, format } = await bridge.call("page.screenshot", args);
+    return { content: [{ type: "image", data: base64, mimeType: format === "png" ? "image/png" : "image/jpeg" }] };
   }
 );
 

@@ -67,14 +67,40 @@ function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
 
-// Keep the service worker alive and the socket connected. WebSocket activity
-// extends SW lifetime (Chrome 116+); the alarm is a fallback reconnect path.
-setInterval(() => send({ ping: Date.now() }), 20000);
+// Keep the service worker alive and the socket connected. An offscreen
+// document (not subject to MV3's ~30s SW idle kill) pings us every 20s, which
+// resets the SW idle timer; WebSocket activity helps too (Chrome 116+), and
+// the alarm is a last-resort reconnect path.
+async function ensureKeepalive() {
+  try {
+    if (await chrome.offscreen.hasDocument()) return;
+    await chrome.offscreen.createDocument({
+      url: "offscreen.html",
+      reasons: ["BLOBS"],
+      justification: "Keeps the service worker alive so the bridge WebSocket stays connected.",
+    });
+  } catch {
+    // Racing a concurrent createDocument is fine — one of them wins.
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.keepalive) {
+    send({ ping: Date.now() });
+    connect();
+  }
+});
+
+function startup() {
+  ensureKeepalive();
+  connect();
+}
+
 chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener((a) => { if (a.name === "bridge-reconnect") connect(); });
-chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
-connect();
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === "bridge-reconnect") startup(); });
+chrome.runtime.onStartup.addListener(startup);
+chrome.runtime.onInstalled.addListener(startup);
+startup();
 
 // ---------------------------------------------------------------------------
 // CDP plumbing
@@ -151,6 +177,17 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   } else if (method === "Network.loadingFailed") {
     const e = state.network.get(params.requestId);
     if (e) e.error = params.errorText;
+  } else if (method === "Page.javascriptDialogOpening") {
+    // Auto-respond so modal dialogs can never wedge the bridge: let
+    // beforeunload proceed (accept = leave the page), dismiss everything
+    // else. Either way, surface it in the console buffer for the agent.
+    const accept = params.type === "beforeunload";
+    state.console.push({
+      level: "info",
+      text: `[${params.type} dialog auto-${accept ? "accepted" : "dismissed"}] ${params.message || ""}`,
+      timestamp: Date.now(),
+    });
+    cdp(tabId, "Page.handleJavaScriptDialog", { accept }).catch(() => {});
   }
 
   if (state.console.length > 2000) state.console.splice(0, state.console.length - 2000);
@@ -218,10 +255,12 @@ const handlers = {
 
   // --- screenshot ----------------------------------------------------------
 
-  async "page.screenshot"({ tabId }) {
+  async "page.screenshot"({ tabId, format = "jpeg", quality = 80 }) {
     await attach(tabId);
-    const { data } = await cdp(tabId, "Page.captureScreenshot", { format: "png" });
-    return { format: "png", base64: data };
+    const params = { format, fromSurface: true };
+    if (format === "jpeg") params.quality = quality;
+    const { data } = await cdp(tabId, "Page.captureScreenshot", params);
+    return { format, base64: data };
   },
 
   // --- input ---------------------------------------------------------------
@@ -367,7 +406,8 @@ function waitForLoad(tabId, timeoutMs) {
 async function refToPoint(tabId, ref) {
   const { result, exceptionDetails } = await cdp(tabId, "Runtime.evaluate", {
     expression: `(() => {
-      const el = window.__dbgRefs && window.__dbgRefs.get(${JSON.stringify(ref)});
+      const w = window.__dbgRefs && window.__dbgRefs.get(${JSON.stringify(ref)});
+      const el = w && w.deref();
       if (!el || !el.isConnected) return null;
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const r = el.getBoundingClientRect();
@@ -384,14 +424,23 @@ async function refToPoint(tabId, ref) {
 // Injected into the page: walks the DOM, assigns stable refs, and returns a
 // compact outline of interactive (or all visible) elements.
 const READ_PAGE_FN = `function (filter) {
-  if (!window.__dbgRefs) { window.__dbgRefs = new Map(); window.__dbgRefN = 0; }
+  if (!window.__dbgRefs) { window.__dbgRefs = new Map(); window.__dbgRefRev = new WeakMap(); window.__dbgRefN = 0; }
   const refs = window.__dbgRefs;
-  const seen = new Map([...refs.entries()].map(([k, v]) => [v, k]));
+  // Refs hold WeakRefs so they never pin removed DOM nodes; sweep dead ones.
+  for (const [k, w] of refs) { if (!w.deref()) refs.delete(k); }
   function refFor(el) {
-    if (seen.has(el)) return seen.get(el);
+    const existing = window.__dbgRefRev.get(el);
+    if (existing && refs.has(existing)) return existing;
     const r = "ref" + (++window.__dbgRefN);
-    refs.set(r, el); seen.set(el, r);
+    refs.set(r, new WeakRef(el)); window.__dbgRefRev.set(el, r);
     return r;
+  }
+  const SENSITIVE_AC = ["current-password","new-password","one-time-code","cc-number","cc-csc","cc-exp"];
+  function isSensitive(el) {
+    const type = (el.getAttribute("type") || "").toLowerCase();
+    if (type === "password" || type === "hidden") return true;
+    const ac = (el.getAttribute("autocomplete") || "").toLowerCase();
+    return SENSITIVE_AC.some((s) => ac.includes(s));
   }
   const INTERACTIVE = new Set(["A","BUTTON","INPUT","SELECT","TEXTAREA","SUMMARY","OPTION"]);
   function isInteractive(el) {
@@ -408,8 +457,12 @@ const READ_PAGE_FN = `function (filter) {
     return s.visibility !== "hidden" && s.display !== "none";
   }
   function name(el) {
-    return (el.getAttribute("aria-label") || el.innerText || el.value || el.placeholder ||
-            el.getAttribute("title") || el.getAttribute("alt") || "").trim().slice(0, 120);
+    // Never let a field's value leak into its name: for form controls the
+    // value fallback only applies to non-sensitive fields.
+    const valueFallback = isSensitive(el) ? "" : (el.value || "");
+    return (el.getAttribute("aria-label") || el.innerText || el.placeholder ||
+            el.getAttribute("title") || el.getAttribute("alt") || valueFallback || "")
+      .trim().slice(0, 120);
   }
   const out = [];
   const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
@@ -431,7 +484,9 @@ const READ_PAGE_FN = `function (filter) {
     const entry = { ref: refFor(node), tag: node.tagName.toLowerCase(), name: name(node) };
     if (node.tagName === "INPUT") entry.type = node.type;
     if (node.tagName === "INPUT" || node.tagName === "TEXTAREA" || node.tagName === "SELECT") {
-      entry.value = String(node.value || "").slice(0, 120);
+      entry.value = isSensitive(node)
+        ? (node.value ? "[value redacted]" : "")
+        : String(node.value || "").slice(0, 120);
     }
     if (node.disabled) entry.disabled = true;
     if (node.checked !== undefined && (node.type === "checkbox" || node.type === "radio")) entry.checked = node.checked;
@@ -446,7 +501,8 @@ const READ_PAGE_FN = `function (filter) {
 // Injected into the page: set a form control's value the way a user would,
 // firing input/change events so frameworks (React, Vue) notice.
 const SET_INPUT_FN = `function (ref, value) {
-  const el = window.__dbgRefs && window.__dbgRefs.get(ref);
+  const w = window.__dbgRefs && window.__dbgRefs.get(ref);
+  const el = w && w.deref();
   if (!el || !el.isConnected) throw new Error("Stale or unknown ref: " + ref);
   el.focus();
   if (el.tagName === "SELECT") {
