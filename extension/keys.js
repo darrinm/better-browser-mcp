@@ -26,13 +26,13 @@ const KEY_ALIASES = {
   up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight",
   arrowup: "ArrowUp", arrowdown: "ArrowDown", arrowleft: "ArrowLeft", arrowright: "ArrowRight",
   home: "Home", end: "End", pageup: "PageUp", pagedown: "PageDown", pgup: "PageUp", pgdn: "PageDown",
-  space: "Space",
+  space: "Space", kpenter: "Enter", prior: "PageUp", next: "PageDown",
 };
 
 const MODIFIER_BITS = {
   alt: 1, option: 1, opt: 1,
   ctrl: 2, control: 2,
-  meta: 4, cmd: 4, command: 4, super: 4, win: 4,
+  meta: 4, cmd: 4, command: 4, super: 4, win: 4, windows: 4,
   shift: 8,
 };
 
@@ -84,9 +84,13 @@ export function parseChord(chord) {
   const keyName = raw === "+" ? "+" : parts.pop();
   let modifiers = 0;
   for (const p of parts) if (p) modifiers |= parseModifiers(p);
-  const named = KEYS[keyName] || KEYS[KEY_ALIASES[keyName.toLowerCase()]];
+  // Accept xdotool-style names too ("Return", "BackSpace", "Page_Down").
+  const named = KEYS[keyName] || KEYS[KEY_ALIASES[keyName.toLowerCase().replace(/_/g, "")]];
   let def = named ? { ...named } : keyName.length === 1 ? charKey(keyName) : null;
   if (!def) throw new Error(`Unknown key "${keyName}". Use a single character or one of: ${Object.keys(KEYS).join(", ")}.`);
+  if (modifiers & (2 | 4) && ["=", "-", "+", "0"].includes(def.key)) {
+    throw new Error(`Page zoom shortcuts like "${raw}" aren't supported — use the computer tool's zoom action to magnify a region instead.`);
+  }
   if (def.shift) modifiers |= 8;
   return { def, modifiers };
 }

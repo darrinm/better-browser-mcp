@@ -2,34 +2,37 @@
 //
 // Connects to a local MCP server over WebSocket and executes commands against
 // browser tabs using the Chrome DevTools Protocol (chrome.debugger) and
-// chrome.scripting.
+// chrome.scripting. The MCP server maps Claude in Chrome's tool set onto the
+// methods below.
 //
 // Protocol (JSON over WebSocket):
 //   request:  { id, method, params }
 //   response: { id, result } | { id, error: { message } }
+//   events:   { event, ... }   (hello, pairing.accepted)
 
 import { charKey, parseChord, parseModifiers, macEditingCommands } from "./keys.js";
-import { loadBlocklist, blockedBy } from "./blocklist.js";
 import {
   readPageInFrame, locateRefInFrame, iframeOffsetInFrame, setInputInFrame, markFileInputInFrame,
   pageTextInFrame, installIndicator, setIndicatorVisible, removeIndicator,
 } from "./frame-scripts.js";
+import { encodeGif, decodeImage, toPng } from "./gif.js";
 
 const BRIDGE_URL = "ws://127.0.0.1:9333";
 const CDP_VERSION = "1.3";
-const MAX_ELEMENTS_PER_FRAME = 3000;
+const MAX_ELEMENTS = 10000;
 const IS_MAC = navigator.userAgent.includes("Mac");
+const GROUP_TITLE = "Claude";
 
 let ws = null;
 let reconnectDelay = 1000;
 
-// Per-tab state: { attached, console: [], network: Map<requestId, entry>,
+// Per-tab state: { attached, domain, console: [], network: Map<requestId, entry>,
 // frames: Map<childFrameId, { parent, index }> }
 const tabs = new Map();
 
 function tabState(tabId) {
   if (!tabs.has(tabId)) {
-    tabs.set(tabId, { attached: false, console: [], network: new Map(), frames: new Map() });
+    tabs.set(tabId, { attached: false, domain: null, console: [], network: new Map(), frames: new Map() });
   }
   return tabs.get(tabId);
 }
@@ -44,22 +47,29 @@ function saveStopped() {
   return chrome.storage.session.set({ stoppedTabs: [...stoppedTabs] });
 }
 
-const blocklistReady = loadBlocklist();
-chrome.storage.onChanged.addListener((changes, area) => {
-  if ("blockedUrlPatterns" in changes && (area === "local" || area === "managed")) loadBlocklist();
-});
-
 // ---------------------------------------------------------------------------
 // WebSocket bridge
 // ---------------------------------------------------------------------------
+
+async function identity() {
+  let { deviceId } = await chrome.storage.local.get("deviceId");
+  if (!deviceId) {
+    deviceId = crypto.randomUUID();
+    await chrome.storage.local.set({ deviceId });
+  }
+  const brands = (navigator.userAgentData && navigator.userAgentData.brands) || [];
+  const brand = brands.map((b) => b.brand).find((b) => !/not.*brand|chromium/i.test(b)) || "Chromium";
+  const platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform;
+  return { deviceId, name: brand, platform };
+}
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   ws = new WebSocket(BRIDGE_URL);
 
-  ws.onopen = () => {
+  ws.onopen = async () => {
     reconnectDelay = 1000;
-    send({ hello: "chrome-debug-bridge", version: chrome.runtime.getManifest().version });
+    send({ event: "hello", version: chrome.runtime.getManifest().version, ...(await identity()) });
   };
 
   ws.onmessage = async (event) => {
@@ -132,6 +142,19 @@ chrome.runtime.onInstalled.addListener(startup);
 startup();
 
 // ---------------------------------------------------------------------------
+// Browser pairing (switch_browser)
+// ---------------------------------------------------------------------------
+
+chrome.notifications.onButtonClicked.addListener((id) => acceptPairing(id));
+chrome.notifications.onClicked.addListener((id) => acceptPairing(id));
+
+function acceptPairing(notificationId) {
+  if (!notificationId.startsWith("pairing:")) return;
+  chrome.notifications.clear(notificationId);
+  send({ event: "pairing.accepted", requestId: notificationId.slice("pairing:".length) });
+}
+
+// ---------------------------------------------------------------------------
 // Stop / resume
 // ---------------------------------------------------------------------------
 
@@ -155,6 +178,33 @@ chrome.action.onClicked.addListener(async (tab) => {
   chrome.action.setBadgeText({ tabId: tab.id, text: "" }).catch(() => {});
   chrome.action.setTitle({ tabId: tab.id, title: "Chrome Debug Bridge" }).catch(() => {});
 });
+
+// ---------------------------------------------------------------------------
+// MCP tab group: the tabs Claude may use, like Claude in Chrome's.
+// ---------------------------------------------------------------------------
+
+async function getGroup() {
+  const { mcpGroupId } = await chrome.storage.session.get("mcpGroupId");
+  if (mcpGroupId === undefined || mcpGroupId === null) return null;
+  try {
+    return await chrome.tabGroups.get(mcpGroupId);
+  } catch {
+    return null; // Chrome removes a group when its last tab closes
+  }
+}
+
+async function createGroup(windowId, tabId) {
+  const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } });
+  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: "orange" });
+  await chrome.storage.session.set({ mcpGroupId: groupId });
+  return chrome.tabGroups.get(groupId);
+}
+
+async function groupTabs(group) {
+  if (!group) return [];
+  const all = await chrome.tabs.query({ groupId: group.id });
+  return all.map((t) => ({ tabId: t.id, title: t.title, url: t.url, active: t.active }));
+}
 
 // ---------------------------------------------------------------------------
 // CDP plumbing
@@ -184,6 +234,9 @@ async function attach(tabId) {
   await cdp(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
   await cdp(tabId, "Network.enable");
   await cdp(tabId, "Log.enable");
+  try {
+    state.domain = new URL((await chrome.tabs.get(tabId)).url).hostname;
+  } catch {}
 }
 
 chrome.debugger.onDetach.addListener((source, reason) => {
@@ -208,13 +261,23 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   }
 });
 
-// Buffer console and network events per tab.
+// Buffer console and network events per tab. Like Claude in Chrome, both
+// buffers only cover the current domain: they reset when the main frame
+// navigates to a different host.
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
   if (!tabId) return;
   const state = tabState(tabId);
 
-  if (method === "Runtime.consoleAPICalled") {
+  if (method === "Page.frameNavigated" && !params.frame.parentId) {
+    let host = null;
+    try { host = new URL(params.frame.url).hostname; } catch {}
+    if (host !== state.domain) {
+      state.domain = host;
+      state.console = [];
+      state.network.clear();
+    }
+  } else if (method === "Runtime.consoleAPICalled") {
     state.console.push({
       level: params.type,
       text: params.args.map(formatRemoteObject).join(" "),
@@ -223,7 +286,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   } else if (method === "Runtime.exceptionThrown") {
     const d = params.exceptionDetails;
     state.console.push({
-      level: "error",
+      level: "exception",
       text: d.exception ? formatRemoteObject(d.exception) : d.text,
       timestamp: params.timestamp,
     });
@@ -237,7 +300,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       type: params.type,
       status: null,
       error: null,
-      startTime: params.timestamp,
+      timestamp: params.wallTime ? Math.round(params.wallTime * 1000) : Date.now(),
     });
   } else if (method === "Network.responseReceived") {
     const e = state.network.get(params.requestId);
@@ -262,10 +325,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 
   if (state.console.length > 2000) state.console.splice(0, state.console.length - 2000);
-  if (state.network.size > 2000) {
-    const firstKey = state.network.keys().next().value;
-    state.network.delete(firstKey);
-  }
+  if (state.network.size > 2000) state.network.delete(state.network.keys().next().value);
 });
 
 function formatRemoteObject(obj) {
@@ -300,9 +360,9 @@ async function pressKey(tabId, def, modifiers, commands = []) {
 }
 
 // Resolve a target given as { ref } or { x, y } to viewport coordinates.
-async function resolvePoint(tabId, { ref, x, y }, label = "target") {
-  if (ref !== undefined) return refToPoint(tabId, ref);
-  if (x === undefined || y === undefined) throw new Error(`Provide ${label} as a ref, or both x and y.`);
+async function resolvePoint(tabId, { ref, x, y }, label = "coordinate") {
+  if (ref !== undefined && ref !== null) return refToPoint(tabId, ref);
+  if (x === undefined || y === undefined) throw new Error(`Provide ${label} or ref.`);
   return { x, y };
 }
 
@@ -317,33 +377,63 @@ async function withIndicatorHidden(tabId, fn) {
   }
 }
 
+// The visual viewport in CSS pixels — the coordinate frame for every click,
+// screenshot and zoom — plus the device pixel ratio.
+async function viewport(tabId) {
+  const m = await cdp(tabId, "Page.getLayoutMetrics");
+  const v = m.cssVisualViewport;
+  const { result } = await cdp(tabId, "Runtime.evaluate", { expression: "devicePixelRatio", returnByValue: true });
+  return { x: v.pageX, y: v.pageY, width: Math.round(v.clientWidth), height: Math.round(v.clientHeight), dpr: result.value || 1 };
+}
+
+// Capture a region of the page (in viewport CSS pixels) at `zoom` output
+// pixels per CSS pixel. Returns the image and its actual dimensions.
+async function capture(tabId, vp, region, zoom, quality = 80) {
+  const params = {
+    format: "jpeg",
+    quality,
+    fromSurface: true,
+    // clip.scale multiplies with the device pixel ratio, so divide it out.
+    clip: { x: vp.x + region.x, y: vp.y + region.y, width: region.width, height: region.height, scale: zoom / vp.dpr },
+  };
+  const { data } = await withIndicatorHidden(tabId, () => cdp(tabId, "Page.captureScreenshot", params));
+  const bmp = await decodeImage(data, "image/jpeg");
+  return { base64: data, mime: "image/jpeg", width: bmp.width, height: bmp.height };
+}
+
 // ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
 
 const handlers = {
-  // --- tabs ---------------------------------------------------------------
+  // --- tab group -----------------------------------------------------------
 
-  async "tabs.context"() {
-    const all = await chrome.tabs.query({});
-    return {
-      tabs: all.map((t) => {
-        const info = { id: t.id, windowId: t.windowId, active: t.active, url: t.url, title: t.title };
-        if (stoppedTabs.has(t.id)) info.stopped = true;
-        if (blockedBy(t.url)) info.blocked = true;
-        return info;
-      }),
-    };
+  async "group.context"({ createIfEmpty = false }) {
+    let group = await getGroup();
+    if (!group && createIfEmpty) {
+      const win = await chrome.windows.create({ url: "about:blank", focused: true });
+      group = await createGroup(win.id, win.tabs[0].id);
+    }
+    return { groupId: group ? group.id : null, tabs: await groupTabs(group) };
   },
 
-  async "tabs.create"({ url }) {
-    const tab = await chrome.tabs.create({ url: url ? normalizeUrl(url) : "about:blank" });
-    return { tabId: tab.id };
+  async "group.createTab"({ url }) {
+    let group = await getGroup();
+    let tab;
+    if (!group) {
+      const win = await chrome.windows.create({ url: url || "about:blank", focused: true });
+      tab = win.tabs[0];
+      group = await createGroup(win.id, tab.id);
+    } else {
+      tab = await chrome.tabs.create({ windowId: group.windowId, url: url || "about:blank", active: true });
+      await chrome.tabs.group({ groupId: group.id, tabIds: [tab.id] });
+    }
+    return { tabId: tab.id, tabs: await groupTabs(group) };
   },
 
-  async "tabs.close"({ tabId }) {
+  async "group.closeTab"({ tabId }) {
     await chrome.tabs.remove(tabId);
-    return { closed: tabId };
+    return { closed: tabId, tabs: await groupTabs(await getGroup()) };
   },
 
   async "window.resize"({ tabId, width, height }) {
@@ -357,64 +447,80 @@ const handlers = {
 
   async "page.navigate"({ tabId, url }) {
     await attach(tabId);
-    // Listen before navigating so a fast (cached) load can't fire unseen, and
-    // match on loaderId so a load from an earlier navigation or a subframe
-    // can't satisfy the wait.
-    const loaded = new Set();
-    let want = null;
-    let wake = () => {};
-    const listener = (source, method, params) => {
-      if (source.tabId !== tabId || method !== "Page.lifecycleEvent" || params.name !== "load") return;
-      loaded.add(params.loaderId);
-      if (want && loaded.has(want)) wake();
-    };
-    chrome.debugger.onEvent.addListener(listener);
-    try {
-      const res = await cdp(tabId, "Page.navigate", { url: normalizeUrl(url) });
-      if (res.errorText) throw new Error(`Navigation failed: ${res.errorText}`);
-      // No loaderId means a same-document navigation (e.g. #hash), which
-      // fires no load event.
-      if (res.loaderId && !loaded.has(res.loaderId)) {
-        want = res.loaderId;
-        await new Promise((resolve) => {
-          wake = resolve;
-          setTimeout(resolve, 15000);
-        });
-      }
-    } finally {
-      chrome.debugger.onEvent.removeListener(listener);
-    }
-    await sleep(300); // let post-load scripts run
-    const tab = await chrome.tabs.get(tabId);
-    const pattern = blockedBy(tab.url);
-    if (pattern) throw new Error(`Navigation ended on a blocked page (${tab.url} matches "${pattern}").`);
-    return { url: tab.url, title: tab.title };
-  },
-
-  async "page.goBack"({ tabId }) {
-    await attach(tabId);
-    const { currentIndex, entries } = await cdp(tabId, "Page.getNavigationHistory");
-    if (currentIndex > 0) {
+    if (url === "back" || url === "forward") {
+      const { currentIndex, entries } = await cdp(tabId, "Page.getNavigationHistory");
+      const target = entries[currentIndex + (url === "back" ? -1 : 1)];
+      if (!target) throw new Error(`Can't go ${url}: no ${url === "back" ? "previous" : "next"} page in history.`);
       // A back-forward-cache restore or a same-document entry fires no load
       // event, so accept those as completion too.
       const loaded = waitForEvent(tabId, (method, params) =>
         method === "Page.loadEventFired" ||
         method === "Page.navigatedWithinDocument" ||
         (method === "Page.frameNavigated" && params.type === "BackForwardCacheRestore"), 15000);
-      await cdp(tabId, "Page.navigateToHistoryEntry", { entryId: entries[currentIndex - 1].id });
+      await cdp(tabId, "Page.navigateToHistoryEntry", { entryId: target.id });
       await loaded;
+    } else {
+      const dest = normalizeUrl(url);
+      try {
+        new URL(dest);
+      } catch {
+        throw new Error(`Invalid URL: "${url}". Could not parse as a valid URL.`);
+      }
+      // Listen before navigating so a fast (cached) load can't fire unseen,
+      // and match on loaderId so a load from an earlier navigation or a
+      // subframe can't satisfy the wait.
+      const loaded = new Set();
+      let want = null;
+      let wake = () => {};
+      const listener = (source, method, params) => {
+        if (source.tabId !== tabId || method !== "Page.lifecycleEvent" || params.name !== "load") return;
+        loaded.add(params.loaderId);
+        if (want && loaded.has(want)) wake();
+      };
+      chrome.debugger.onEvent.addListener(listener);
+      try {
+        const res = await cdp(tabId, "Page.navigate", { url: dest });
+        if (res.errorText) throw new Error(`Navigation failed: ${res.errorText}`);
+        // No loaderId means a same-document navigation (e.g. #hash), which
+        // fires no load event.
+        if (res.loaderId && !loaded.has(res.loaderId)) {
+          want = res.loaderId;
+          await new Promise((resolve) => {
+            wake = resolve;
+            setTimeout(resolve, 15000);
+          });
+        }
+      } finally {
+        chrome.debugger.onEvent.removeListener(listener);
+      }
     }
-    return {};
+    await sleep(300); // let post-load scripts run
+    const tab = await chrome.tabs.get(tabId);
+    return { url: tab.url, title: tab.title };
   },
 
-  // --- screenshot ----------------------------------------------------------
+  // --- screenshots -----------------------------------------------------------
 
-  async "page.screenshot"({ tabId, format = "jpeg", quality = 80 }) {
+  async "page.screenshot"({ tabId, scale = 1 }) {
     await attach(tabId);
-    const params = { format, fromSurface: true };
-    if (format === "jpeg") params.quality = quality;
-    const { data } = await withIndicatorHidden(tabId, () => cdp(tabId, "Page.captureScreenshot", params));
-    return { format, base64: data };
+    const vp = await viewport(tabId);
+    const img = await capture(tabId, vp, { x: 0, y: 0, width: vp.width, height: vp.height }, scale);
+    return { ...img, frameWidth: vp.width, frameHeight: vp.height };
+  },
+
+  async "page.zoom"({ tabId, region, scale = 1 }) {
+    await attach(tabId);
+    if (!Array.isArray(region) || region.length !== 4) throw new Error("zoom needs region [x0, y0, x1, y1].");
+    const [x0, y0, x1, y1] = region.map(Number);
+    const width = x1 - x0;
+    const height = y1 - y0;
+    if (!(width > 0 && height > 0)) throw new Error("zoom region must have x1 > x0 and y1 > y0.");
+    const vp = await viewport(tabId);
+    // Magnify small regions (up to 4x, at least device resolution) so details
+    // are legible, aiming for ~1024px on the long side.
+    const zoom = Math.min(4, Math.max(vp.dpr, 1024 / Math.max(width, height))) * scale;
+    const img = await capture(tabId, vp, { x: x0, y: y0, width, height }, zoom, 90);
+    return { ...img, frameWidth: vp.width, frameHeight: vp.height };
   },
 
   // --- input ---------------------------------------------------------------
@@ -429,7 +535,7 @@ const handlers = {
         await mouse(tabId, "mousePressed", p.x, p.y, { button, clickCount: i, modifiers: mods });
         await mouse(tabId, "mouseReleased", p.x, p.y, { button, clickCount: i, modifiers: mods });
       }
-      return { clicked: p };
+      return { x: p.x, y: p.y };
     });
   },
 
@@ -437,15 +543,15 @@ const handlers = {
     await attach(tabId);
     const p = await resolvePoint(tabId, { ref, x, y });
     await mouse(tabId, "mouseMoved", p.x, p.y);
-    return { hovered: p };
+    return { x: p.x, y: p.y };
   },
 
   async "input.drag"({ tabId, from, to, modifiers }) {
     await attach(tabId);
     const mods = parseModifiers(modifiers);
     return withIndicatorHidden(tabId, async () => {
-      const a = await resolvePoint(tabId, from || {}, "from");
-      const b = await resolvePoint(tabId, to || {}, "to");
+      const a = await resolvePoint(tabId, from || {}, "start_coordinate");
+      const b = await resolvePoint(tabId, to || {}, "coordinate");
       // HTML5 drag-and-drop doesn't run off synthetic mouse events alone, so
       // intercept the drag Chrome starts and replay it as drag events (the
       // same approach Puppeteer uses). Pointer-based drags (sliders, canvas,
@@ -476,7 +582,7 @@ const handlers = {
         chrome.debugger.onEvent.removeListener(onDrag);
         await cdp(tabId, "Input.setInterceptDrags", { enabled: false }).catch(() => {});
       }
-      return { from: a, to: b, html5Drag: !!dragData };
+      return { from: a, to: b };
     });
   },
 
@@ -507,75 +613,47 @@ const handlers = {
     return {};
   },
 
-  async "input.key"({ tabId, key, repeat = 1 }) {
+  // Space-separated keys or chords, e.g. "Backspace Backspace Delete" or
+  // "cmd+a", optionally repeated.
+  async "input.keys"({ tabId, text, repeat = 1 }) {
     await attach(tabId);
-    const { def, modifiers } = parseChord(key);
-    const commands = IS_MAC ? macEditingCommands(def, modifiers) : [];
-    for (let i = 0; i < repeat; i++) await pressKey(tabId, def, modifiers, commands);
+    const chords = String(text || "").trim().split(/\s+/).filter(Boolean);
+    if (!chords.length) throw new Error("key action needs text naming the key(s) to press.");
+    const parsed = chords.map(parseChord); // validate everything before pressing anything
+    for (let r = 0; r < repeat; r++) {
+      for (const { def, modifiers } of parsed) {
+        await pressKey(tabId, def, modifiers, IS_MAC ? macEditingCommands(def, modifiers) : []);
+      }
+    }
+    return { pressed: chords.length * repeat };
+  },
+
+  async "input.scroll"({ tabId, x, y, direction, amount = 3 }) {
+    await attach(tabId);
+    if (x === undefined || y === undefined) {
+      const vp = await viewport(tabId);
+      x = Math.floor(vp.width / 2);
+      y = Math.floor(vp.height / 2);
+    }
+    const tick = 100 * amount;
+    const deltaX = direction === "left" ? -tick : direction === "right" ? tick : 0;
+    const deltaY = direction === "up" ? -tick : direction === "down" ? tick : 0;
+    if (!deltaX && !deltaY) throw new Error('scroll_direction must be "up", "down", "left" or "right".');
+    await mouse(tabId, "mouseWheel", x, y, { deltaX, deltaY });
+    await sleep(150); // let smooth scrolling settle before the next screenshot
     return {};
   },
 
-  async "input.scroll"({ tabId, x, y, ref, deltaX = 0, deltaY = 0 }) {
+  async "input.scrollTo"({ tabId, ref }) {
     await attach(tabId);
-    if (ref !== undefined) {
-      // Scrolling to a ref brings it to the middle of the viewport.
-      return { scrolledTo: await refToPoint(tabId, ref) };
-    }
-    if (x === undefined || y === undefined) {
-      const m = await cdp(tabId, "Page.getLayoutMetrics");
-      x = Math.floor(m.cssVisualViewport.clientWidth / 2);
-      y = Math.floor(m.cssVisualViewport.clientHeight / 2);
-    }
-    await mouse(tabId, "mouseWheel", x, y, { deltaX, deltaY });
-    return {};
+    return refToPoint(tabId, ref);
   },
 
   // --- page content ----------------------------------------------------------
 
-  async "page.read"({ tabId, filter = "interactive", fullPage = false, ref, maxDepth = 15, maxChars = 50000, query }) {
+  async "page.read"({ tabId, filter = "all", depth = 15, ref_id, max_chars = 50000 }) {
     await attach(tabId);
-    const opts = {
-      filter,
-      viewportOnly: !fullPage,
-      maxDepth,
-      query: query ? String(query).toLowerCase() : null,
-      focusRef: null,
-      maxElements: MAX_ELEMENTS_PER_FRAME,
-    };
-    // Walk every frame (including cross-origin iframes) in the extension's
-    // isolated world, where closed shadow roots are reachable.
-    const [results, frameInfo] = await Promise.all([
-      chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: readPageInFrame, args: [opts] }),
-      chrome.webNavigation.getAllFrames({ tabId }),
-    ]);
-    const byFrame = new Map();
-    for (const r of results) if (r.result) byFrame.set(r.frameId, r.result);
-
-    let startFrame = 0;
-    if (ref) {
-      const { frameId, localRef } = parseRef(ref);
-      startFrame = frameId;
-      const focused = await runInFrame(tabId, frameId, readPageInFrame, [{ ...opts, viewportOnly: false, focusRef: localRef }]);
-      if (!focused) throw new Error(staleRefMessage(ref));
-      if (focused.error) throw new Error(focused.error);
-      byFrame.set(frameId, focused);
-    }
-    const main = byFrame.get(0);
-    if (!main || !byFrame.has(startFrame)) {
-      throw new Error("Could not read the page (chrome:// pages and the Web Store can't be scripted).");
-    }
-
-    // Match each child frame to its parent's <iframe> placeholder by its
-    // index in the parent's window.frames.
-    const childAt = new Map();
-    for (const f of frameInfo || []) {
-      const r = byFrame.get(f.frameId);
-      if (f.parentFrameId >= 0 && r && r.selfIndex >= 0) childAt.set(`${f.parentFrameId}:${r.selfIndex}`, f.frameId);
-    }
-
-    // Splice child frames in where their <iframe> appears. Only frames
-    // reachable through visible iframes are included, so hidden iframes
-    // can't inject content into the outline.
+    const { byFrame, startFrame, childAt } = await readFrames(tabId, { filter, maxDepth: depth, query: null }, ref_id);
     const state = tabState(tabId);
     const lines = [];
     let truncated = false;
@@ -585,13 +663,12 @@ const handlers = {
       const r = byFrame.get(frameId);
       truncated ||= r.truncated;
       for (const e of r.elements) {
-        const pad = "  ".repeat(e.depth + offset);
+        const pad = " ".repeat(e.depth + offset);
         if (e.childIndex !== undefined) {
           const childId = childAt.get(`${frameId}:${e.childIndex}`);
           if (childId === undefined || seen.has(childId)) continue;
           state.frames.set(childId, { parent: frameId, index: e.childIndex });
-          const child = byFrame.get(childId);
-          lines.push(`${pad}iframe${e.name ? ` "${quote(e.name)}"` : ""} [frame ${childId}] src=${child.url}`);
+          lines.push(`${pad}iframe${e.name ? ` "${quote(e.name)}"` : ""} src="${quote(byFrame.get(childId).url)}"`);
           emit(childId, e.depth + offset + 1);
         } else {
           lines.push(...renderEntry(e, pad, frameId));
@@ -599,32 +676,59 @@ const handlers = {
       }
     };
     emit(startFrame, 0);
-
-    const header = [`Page: ${main.title}`, `URL: ${main.url}`, `Viewport: ${main.viewport.width}x${main.viewport.height}`];
-    if (!fullPage && !query && !ref) header.push("(Only elements in the viewport are shown; pass fullPage: true for the whole page.)");
-    let body = lines.join("\n");
-    if (!body) body = query ? `No elements matching "${query}".` : "(no matching elements)";
-    if (truncated) body += "\n[some elements omitted: element or depth limit reached — use ref to focus on a subtree]";
-    if (body.length > maxChars) {
-      const cut = Math.max(0, body.lastIndexOf("\n", maxChars));
-      body = `${body.slice(0, cut)}\n[output truncated at ${cut} of ${body.length} characters — pass a larger maxChars, or use ref to focus]`;
+    const main = byFrame.get(0) || byFrame.get(startFrame);
+    let content = lines.join("\n");
+    const focus = ref_id ? "use a smaller depth or focus on a more specific child element" : "use ref_id or a smaller depth to focus";
+    if (truncated) content += `\n[truncated — the page is very large; ${focus}]`;
+    if (content.length > max_chars) {
+      const total = content.length;
+      const cut = Math.max(0, content.lastIndexOf("\n", max_chars));
+      content = `${content.slice(0, cut)}\n[output truncated at ${max_chars} of ${total} characters. Pass a larger max_chars (default 50000) to see more, or ${focus}.]`;
     }
-    return { text: `${header.join("\n")}\n\n${body}` };
+    return { text: content, viewport: main.viewport };
   },
 
-  async "page.text"({ tabId, maxChars = 50000 }) {
+  async "page.find"({ tabId, query }) {
+    await attach(tabId);
+    const { byFrame, childAt } = await readFrames(tabId, { filter: "all", maxDepth: 1000, query: String(query) }, null);
+    // Only frames reachable through visible iframes count.
+    const state = tabState(tabId);
+    const matches = [];
+    const visit = (frameId) => {
+      for (const e of byFrame.get(frameId).elements) {
+        if (e.childIndex !== undefined) {
+          const childId = childAt.get(`${frameId}:${e.childIndex}`);
+          if (childId === undefined) continue;
+          state.frames.set(childId, { parent: frameId, index: e.childIndex });
+          visit(childId);
+        } else {
+          matches.push({ e, frameId });
+        }
+      }
+    };
+    visit(0);
+    matches.sort((a, b) => b.e.score - a.e.score);
+    if (!matches.length) return { text: `No elements found matching "${query}".` };
+    const lines = matches.slice(0, 20).flatMap(({ e, frameId }) => renderEntry(e, "", frameId));
+    if (matches.length > 20) {
+      lines.push(`[${matches.length} elements matched; showing the best 20. Use a more specific query to narrow the results.]`);
+    }
+    return { text: lines.join("\n") };
+  },
+
+  async "page.text"({ tabId }) {
     await attach(tabId);
     const r = await runInFrame(tabId, 0, pageTextInFrame, []);
     if (!r) throw new Error("Could not read the page text.");
-    let text = r.text;
-    if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n[truncated at ${maxChars} of ${r.text.length} characters]`;
-    return { text: `Page: ${r.title}\nURL: ${r.url}\n\n${text}` };
+    return r;
   },
 
-  async "page.eval"({ tabId, expression }) {
+  async "page.eval"({ tabId, code }) {
     await attach(tabId);
+    // replMode gives top-level await and returns the last expression.
     const { result, exceptionDetails } = await cdp(tabId, "Runtime.evaluate", {
-      expression,
+      expression: code,
+      replMode: true,
       returnByValue: true,
       awaitPromise: true,
       userGesture: true,
@@ -635,13 +739,13 @@ const handlers = {
         : exceptionDetails.text;
       throw new Error(msg);
     }
-    return { value: result.value !== undefined ? result.value : formatRemoteObject(result) };
+    return { type: result.type, value: result.value !== undefined ? result.value : formatRemoteObject(result) };
   },
 
   async "form.input"({ tabId, ref, value }) {
     await attach(tabId);
     const { frameId, localRef } = parseRef(ref);
-    const out = await runInFrame(tabId, frameId, setInputInFrame, [localRef, String(value)]);
+    const out = await runInFrame(tabId, frameId, setInputInFrame, [localRef, value]);
     if (!out || out.error) throw new Error((out && out.error) || staleRefMessage(ref));
     return out;
   },
@@ -675,26 +779,75 @@ const handlers = {
     return { uploaded: files.length };
   },
 
+  // Drop local files onto the page at a point, as if dragged in from the OS.
+  async "page.dropFiles"({ tabId, x, y, files }) {
+    await attach(tabId);
+    const data = { items: [], files, dragOperationsMask: 1 };
+    for (const type of ["dragEnter", "dragOver", "drop"]) {
+      await cdp(tabId, "Input.dispatchDragEvent", { type, x, y, data });
+    }
+    return { dropped: files.length };
+  },
+
   // --- diagnostics -----------------------------------------------------------
 
-  async "console.read"({ tabId, pattern, limit = 100 }) {
+  async "console.read"({ tabId, pattern, limit = 100, onlyErrors = false, clear = false }) {
     await attach(tabId);
-    let entries = tabState(tabId).console;
+    const state = tabState(tabId);
+    let entries = state.console;
+    if (onlyErrors) entries = entries.filter((e) => e.level === "error" || e.level === "exception");
     if (pattern) {
       const re = new RegExp(pattern);
       entries = entries.filter((e) => re.test(e.text));
     }
-    return { messages: entries.slice(-limit) };
+    const out = entries.slice(-limit);
+    if (clear) state.console = [];
+    return { domain: state.domain, messages: out };
   },
 
-  async "network.read"({ tabId, pattern, limit = 100 }) {
+  async "network.read"({ tabId, urlPattern, limit = 100, clear = false }) {
     await attach(tabId);
-    let entries = [...tabState(tabId).network.values()];
-    if (pattern) {
-      const re = new RegExp(pattern);
-      entries = entries.filter((e) => re.test(e.url));
-    }
-    return { requests: entries.slice(-limit) };
+    const state = tabState(tabId);
+    let entries = [...state.network.values()];
+    if (urlPattern) entries = entries.filter((e) => e.url.includes(urlPattern));
+    const out = entries.slice(-limit);
+    if (clear) state.network.clear();
+    return { domain: state.domain, requests: out };
+  },
+
+  // --- images and GIFs ---------------------------------------------------------
+
+  async "gif.encode"({ frames, options }) {
+    return { base64: await encodeGif(frames, options) };
+  },
+
+  async "gif.download"({ base64, filename }) {
+    const downloadId = await chrome.downloads.download({ url: `data:image/gif;base64,${base64}`, filename, saveAs: false });
+    return { downloadId, filename };
+  },
+
+  async "image.toPng"({ base64, mime }) {
+    return { base64: await toPng(base64, mime) };
+  },
+
+  // --- browser pairing -------------------------------------------------------
+
+  async "pairing.request"({ requestId }) {
+    await chrome.notifications.create(`pairing:${requestId}`, {
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: "Use this browser for Claude?",
+      message: "A Claude session wants to automate this browser. Click Connect to choose it.",
+      buttons: [{ title: "Connect" }],
+      requireInteraction: true,
+      priority: 2,
+    });
+    return {};
+  },
+
+  async "pairing.cancel"({ requestId }) {
+    await chrome.notifications.clear(`pairing:${requestId}`);
+    return {};
   },
 
   // --- development -----------------------------------------------------------
@@ -707,37 +860,43 @@ const handlers = {
   },
 };
 
-// Gate every command on the stop state and the blocklist, and keep the
-// indicator up on tabs being driven.
+const GROUP_FREE = new Set(["group.context", "group.createTab"]);
+
+// Commands that target a tab must name one in the MCP tab group, that the
+// user hasn't stopped, and that isn't one of this extension's own pages.
+// Also keep the indicator up on tabs being driven.
 async function handle(method, params) {
   const h = handlers[method];
   if (!h) throw new Error(`Unknown method: ${method}`);
-  await Promise.all([stoppedReady, blocklistReady]);
-
-  if ((method === "tabs.create" || method === "page.navigate") && params.url) {
-    if (isOwnPage(params.url)) throw new Error(OWN_PAGE_ERROR);
-    const pattern = blockedBy(normalizeUrl(params.url));
-    if (pattern) {
-      throw new Error(`${params.url} is blocked by the user's site blocklist ("${pattern}"). Don't try to reach it another way.`);
-    }
-  }
+  await stoppedReady;
 
   const { tabId } = params;
-  if (tabId !== undefined && method !== "tabs.close") {
-    if (stoppedTabs.has(tabId)) {
+  if (tabId !== undefined && !GROUP_FREE.has(method)) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      throw new Error(`Tab ${tabId} doesn't exist. Use tabs_context_mcp to get valid tab IDs.`);
+    }
+    const group = await getGroup();
+    if (!group || tab.groupId !== group.id) {
       throw new Error(
-        "The user pressed Stop on this tab. Don't continue on it unless they ask you to; " +
-        "they can re-enable it by clicking the extension's toolbar icon on that tab."
+        `Tab ${tabId} is not in the MCP tab group. Use tabs_context_mcp to see the tabs you can use, ` +
+        "or tabs_create_mcp to open a new one."
       );
     }
-    const tab = await chrome.tabs.get(tabId);
-    if (isOwnPage(tab.url)) throw new Error(OWN_PAGE_ERROR);
-    const pattern = blockedBy(tab.url);
-    if (pattern && method !== "page.navigate") {
-      throw new Error(`This tab is on a blocked site (${tab.url} matches "${pattern}"). Navigate it elsewhere or use another tab.`);
+    if (method !== "group.closeTab") {
+      if (stoppedTabs.has(tabId)) {
+        throw new Error(
+          "The user pressed Stop on this tab. Don't continue on it unless they ask you to; " +
+          "they can re-enable it by clicking the extension's toolbar icon on that tab."
+        );
+      }
+      if (isOwnPage(tab.url)) throw new Error(OWN_PAGE_ERROR);
+      if (method !== "window.resize") runInFrame(tabId, 0, installIndicator, []);
     }
-    if (method !== "window.resize") runInFrame(tabId, 0, installIndicator, []);
   }
+  if (method === "page.navigate" && isOwnPage(params.url)) throw new Error(OWN_PAGE_ERROR);
   return h(params);
 }
 
@@ -749,8 +908,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The extension's own pages (options, offscreen) hold the blocklist; an agent
-// that could drive them could edit it, so they're off limits.
+// The extension's own pages run with extension privileges; an agent driving
+// them could reach chrome.* APIs, so they're off limits.
 const OWN_PAGE_ERROR = "The bridge extension's own pages can't be automated.";
 function isOwnPage(url) {
   return String(url || "").startsWith(chrome.runtime.getURL(""));
@@ -763,21 +922,60 @@ function normalizeUrl(url) {
 
 const quote = (s) => String(s).replace(/"/g, '\\"');
 
-// Render one outline entry as text lines, like:  button "Sign in" [ref4]
+// Read every frame (plus a focused subtree if ref_id is given) and work out
+// which child frame belongs to which parent <iframe>.
+async function readFrames(tabId, opts, refId) {
+  const base = { ...opts, focusRef: null, maxElements: MAX_ELEMENTS };
+  const [results, frameInfo] = await Promise.all([
+    chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: readPageInFrame, args: [base] }),
+    chrome.webNavigation.getAllFrames({ tabId }),
+  ]);
+  const byFrame = new Map();
+  for (const r of results) if (r.result) byFrame.set(r.frameId, r.result);
+
+  let startFrame = 0;
+  if (refId) {
+    const { frameId, localRef } = parseRef(refId);
+    startFrame = frameId;
+    const focused = await runInFrame(tabId, frameId, readPageInFrame, [{ ...base, focusRef: localRef }]);
+    if (!focused) throw new Error(staleRefMessage(refId));
+    if (focused.error) throw new Error(focused.error);
+    byFrame.set(frameId, focused);
+  }
+  if (!byFrame.has(startFrame)) {
+    throw new Error("Could not read the page (chrome:// pages and the Web Store can't be scripted).");
+  }
+  // Match each child frame to its parent's <iframe> placeholder by its
+  // index in the parent's window.frames.
+  const childAt = new Map();
+  for (const f of frameInfo || []) {
+    const r = byFrame.get(f.frameId);
+    if (f.parentFrameId >= 0 && r && r.selfIndex >= 0) childAt.set(`${f.parentFrameId}:${r.selfIndex}`, f.frameId);
+  }
+  return { byFrame, startFrame, childAt };
+}
+
+// Render one outline entry like Claude in Chrome does:
+//   button "Sign in" [ref_4] type="submit"
 function renderEntry(e, pad, frameId) {
   const ref = frameId === 0 ? e.ref : `${e.ref}@f${frameId}`;
   let line = `${pad}${e.role}`;
   if (e.name) line += ` "${quote(e.name)}"`;
   line += ` [${ref}]`;
-  if (e.type && !["text", "submit", "button"].includes(e.type)) line += ` type=${e.type}`;
   if (e.href) line += ` href="${quote(e.href)}"`;
+  if (e.type) line += ` type="${quote(e.type)}"`;
   if (e.placeholder) line += ` placeholder="${quote(e.placeholder)}"`;
   if (e.value !== undefined) line += ` value="${quote(e.value)}"`;
   if (e.checked !== undefined) line += e.checked ? " (checked)" : " (unchecked)";
   if (e.expanded !== undefined) line += e.expanded ? " (expanded)" : " (collapsed)";
   if (e.disabled) line += " (disabled)";
   const lines = [line];
-  for (const o of e.options || []) lines.push(`${pad}  option "${quote(o.text)}"${o.selected ? " (selected)" : ""}`);
+  for (const o of e.options || []) {
+    let opt = `${pad} option "${quote(o.text)}"`;
+    if (o.selected) opt += " (selected)";
+    if (o.value && o.value !== o.text) opt += ` value="${quote(o.value)}"`;
+    lines.push(opt);
+  }
   return lines;
 }
 
@@ -808,15 +1006,15 @@ async function runInFrame(tabId, frameId, func, args) {
   }
 }
 
-// Refs are "ref12" in the main frame and "ref12@f7" in frame 7.
+// Refs are "ref_12" in the main frame and "ref_12@f7" in frame 7.
 function parseRef(ref) {
-  const m = /^(ref\d+)(?:@f(\d+))?$/.exec(String(ref));
-  if (!m) throw new Error(`Malformed ref "${ref}" — use a ref from read_page.`);
+  const m = /^(ref_\d+)(?:@f(\d+))?$/.exec(String(ref));
+  if (!m) throw new Error(`Malformed ref "${ref}" — use a ref from read_page or find (e.g. "ref_12").`);
   return { localRef: m[1], frameId: m[2] ? Number(m[2]) : 0 };
 }
 
 function staleRefMessage(ref) {
-  return `Stale or unknown ref "${ref}" — call read_page again to refresh refs.`;
+  return `Element with ref_id '${ref}' not found. It may have been removed from the page. Use read_page or find to get current refs.`;
 }
 
 // Resolve a ref to top-level viewport coordinates of the element's center.
