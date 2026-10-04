@@ -7,8 +7,7 @@
 //   node install-host.js --extension-id=<id>   allow a different extension ID
 //
 // The host manifest's allowed_origins pins which extension may launch the
-// host. An unpacked extension's ID is derived from the absolute path it was
-// loaded from, so by default we compute it from ../extension.
+// host. By default the ID is computed from ../extension/manifest.json.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -27,19 +26,27 @@ if (process.platform !== "darwin" && process.platform !== "linux") {
   process.exit(1);
 }
 
-// Chrome derives an unpacked extension's ID from its path: the first 128 bits
-// of SHA-256, written with the letters a-p instead of hex digits.
-function idFromPath(p) {
+// Chrome derives an extension's ID from the public key in its manifest's
+// "key" field, or, for an unpacked extension without one, from the folder's
+// path: the first 128 bits of SHA-256, written with the letters a-p instead
+// of hex digits. The manifest carries a key so the ID survives moving the
+// folder.
+function toId(bytes) {
   return crypto
     .createHash("sha256")
-    .update(p)
+    .update(bytes)
     .digest("hex")
     .slice(0, 32)
     .replace(/./g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
 }
 
 const extensionDir = path.resolve(here, "../extension");
-const extensionId = idFlag ? idFlag.split("=")[1] : idFromPath(extensionDir);
+const manifestKey = JSON.parse(fs.readFileSync(path.join(extensionDir, "manifest.json"), "utf8")).key;
+const extensionId = idFlag
+  ? idFlag.split("=")[1]
+  : manifestKey
+    ? toId(Buffer.from(manifestKey, "base64"))
+    : toId(extensionDir);
 
 const browserDirs = (process.platform === "darwin"
   ? [
@@ -130,5 +137,5 @@ for (const dir of browserDirs) {
   console.log(`installed ${file}`);
 }
 console.log(`launcher:     ${launcher}`);
-console.log(`extension ID: ${extensionId} (from ${extensionDir})`);
+console.log(`extension ID: ${extensionId} (from ${manifestKey ? "the manifest key" : extensionDir})`);
 console.log("Reload the extension (chrome://extensions) so it connects to the host.");
