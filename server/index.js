@@ -3,131 +3,23 @@
 //
 // Exposes the same tools, with the same names and parameters, as Claude in
 // Chrome, so prompts and skills written for it work unchanged. Speaks MCP over
-// stdio to the agent and relays commands to the extension (one or more
-// connected browsers) over a localhost WebSocket.
+// stdio to the agent and reaches the extension in each connected browser
+// through that browser's native messaging host (see bridge.js).
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { WebSocketServer } from "ws";
 import { z } from "zod";
+import { Bridge } from "./bridge.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const WS_PORT = Number(process.env.BRIDGE_PORT || 9333);
-const REQUEST_TIMEOUT_MS = 60000;
 const IMAGE_TTL_MS = 5 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const OUT_DIR = path.join(os.tmpdir(), "chrome-debug-bridge");
 
-// ---------------------------------------------------------------------------
-// Bridge: connected browsers, keyed by the extension's persistent deviceId
-// ---------------------------------------------------------------------------
-
-class Bridge {
-  constructor(port) {
-    this.browsers = new Map(); // deviceId -> { socket, info }
-    this.selected = null;
-    this.nextId = 1;
-    this.pending = new Map();
-    this.pairings = new Map(); // requestId -> resolve(deviceId)
-    this.wss = new WebSocketServer({ host: "127.0.0.1", port });
-    this.wss.on("connection", (socket) => {
-      socket.on("message", (data) => this.onMessage(socket, data));
-      socket.on("close", () => {
-        for (const [id, b] of this.browsers) if (b.socket === socket) this.browsers.delete(id);
-      });
-    });
-  }
-
-  onMessage(socket, data) {
-    let msg;
-    try {
-      msg = JSON.parse(data.toString());
-    } catch {
-      return;
-    }
-    if (msg.event === "hello") {
-      const { deviceId, name, platform, version } = msg;
-      this.browsers.set(deviceId, { socket, info: { deviceId, name, platform, version, connectedAt: Date.now() } });
-      return;
-    }
-    if (msg.event === "pairing.accepted") {
-      const resolve = this.pairings.get(msg.requestId);
-      const entry = [...this.browsers.values()].find((b) => b.socket === socket);
-      if (resolve && entry) resolve(entry.info.deviceId);
-      return;
-    }
-    if (msg.id === undefined) return;
-    const entry = this.pending.get(msg.id);
-    if (!entry) return;
-    this.pending.delete(msg.id);
-    clearTimeout(entry.timer);
-    if (msg.error) entry.reject(new Error(msg.error.message));
-    else entry.resolve(msg.result);
-  }
-
-  list() {
-    return [...this.browsers.values()].map((b) => b.info);
-  }
-
-  target() {
-    if (this.selected && this.browsers.has(this.selected)) return this.browsers.get(this.selected);
-    if (this.browsers.size === 1) return [...this.browsers.values()][0];
-    if (!this.browsers.size) {
-      throw new Error(
-        "No browser is connected. Make sure Chrome is running with the Chrome Debug Bridge extension " +
-        "loaded (chrome://extensions → Load unpacked)."
-      );
-    }
-    throw new Error(
-      "Several browsers are connected and none is selected. Use list_connected_browsers, ask the user " +
-      "which one to use, then call select_browser."
-    );
-  }
-
-  sendTo(socket, method, params) {
-    const id = this.nextId++;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Timed out waiting for the browser to respond to ${method}`));
-      }, REQUEST_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
-      socket.send(JSON.stringify({ id, method, params }));
-    });
-  }
-
-  call(method, params = {}) {
-    let target;
-    try {
-      target = this.target();
-    } catch (err) {
-      return Promise.reject(err);
-    }
-    return this.sendTo(target.socket, method, params);
-  }
-
-  // Ask every connected browser to show a "Connect" prompt; resolve with the
-  // deviceId of the one the user clicks, or null on timeout.
-  async pair(timeoutMs) {
-    const requestId = crypto.randomUUID();
-    const sockets = [...this.browsers.values()].map((b) => b.socket);
-    if (!sockets.length) throw new Error("No browser is connected.");
-    const chosen = new Promise((resolve) => {
-      this.pairings.set(requestId, resolve);
-      setTimeout(() => resolve(null), timeoutMs);
-    });
-    await Promise.all(sockets.map((s) => this.sendTo(s, "pairing.request", { requestId }).catch(() => {})));
-    const deviceId = await chosen;
-    this.pairings.delete(requestId);
-    await Promise.all(sockets.map((s) => this.sendTo(s, "pairing.cancel", { requestId }).catch(() => {})));
-    return deviceId;
-  }
-}
-
-const bridge = new Bridge(WS_PORT);
+const bridge = new Bridge();
 
 // ---------------------------------------------------------------------------
 // Session state: screenshots (for upload_image) and GIF recording
@@ -455,17 +347,17 @@ const impl = {
       deviceId: b.deviceId,
       name: b.name,
       platform: b.platform,
-      isLocal: true, // the bridge only accepts connections from this machine
+      isLocal: true, // hosts are reached over local Unix sockets
       onThisComputer: true,
-      inUse: bridge.selected ? b.deviceId === bridge.selected : bridge.browsers.size === 1,
+      inUse: bridge.selected ? b.deviceId === bridge.selected : bridge.entries().length === 1,
     }));
     return ok(text(list.length ? JSON.stringify(list, null, 2) : "No browsers are connected."));
   },
 
   async select_browser({ deviceId }) {
-    need(bridge.browsers.has(deviceId), `No connected browser has deviceId ${deviceId}. Use list_connected_browsers.`);
+    need(bridge.find(deviceId), `No connected browser has deviceId ${deviceId}. Use list_connected_browsers.`);
     bridge.selected = deviceId;
-    const b = bridge.browsers.get(deviceId).info;
+    const b = bridge.find(deviceId).info;
     return ok(text(`Selected ${b.name} (${deviceId}) for browser automation.`));
   },
 
@@ -473,7 +365,7 @@ const impl = {
     const deviceId = await bridge.pair(120000);
     if (!deviceId) return { isError: true, content: [text("No browser was chosen within 2 minutes.")] };
     bridge.selected = deviceId;
-    const b = bridge.browsers.get(deviceId).info;
+    const b = bridge.find(deviceId).info;
     return ok(text(`Connected to ${b.name} (${deviceId}).`));
   },
 };
@@ -883,4 +775,4 @@ if (process.env.BRIDGE_DEV) {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error(`chrome-debug-bridge: MCP on stdio, extension bridge on ws://127.0.0.1:${WS_PORT}`);
+console.error(`chrome-debug-bridge: MCP on stdio, browsers via native hosts in ${bridge.dir}`);

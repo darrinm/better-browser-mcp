@@ -1,14 +1,16 @@
 // Chrome Debug Bridge — MV3 service worker.
 //
-// Connects to a local MCP server over WebSocket and executes commands against
-// browser tabs using the Chrome DevTools Protocol (chrome.debugger) and
-// chrome.scripting. The MCP server maps Claude in Chrome's tool set onto the
-// methods below.
+// Talks to a native messaging host (server/native-host.js), which relays
+// commands from local MCP servers, and executes them against browser tabs
+// using the Chrome DevTools Protocol (chrome.debugger) and chrome.scripting.
+// The MCP server maps Claude in Chrome's tool set onto the methods below.
 //
-// Protocol (JSON over WebSocket):
+// Protocol (JSON messages over the native messaging port):
 //   request:  { id, method, params }
 //   response: { id, result } | { id, error: { message } }
-//   events:   { event, ... }   (hello, pairing.accepted)
+//   events:   { event, ... }   (hello, pairing.accepted; from the host: ready)
+//   chunks:   { chunk: { id, index, count, data } }  (host -> extension
+//             messages over Chrome's 1 MB limit, split by the host)
 
 import { charKey, parseChord, parseModifiers, macEditingCommands } from "./keys.js";
 import {
@@ -17,14 +19,10 @@ import {
 } from "./frame-scripts.js";
 import { encodeGif, decodeImage, toPng } from "./gif.js";
 
-const BRIDGE_URL = "ws://127.0.0.1:9333";
 const CDP_VERSION = "1.3";
 const MAX_ELEMENTS = 10000;
 const IS_MAC = navigator.userAgent.includes("Mac");
 const GROUP_TITLE = "Claude";
-
-let ws = null;
-let reconnectDelay = 1000;
 
 // Per-tab state: { attached, domain, console: [], network: Map<requestId, entry>,
 // frames: Map<childFrameId, { parent, index }> }
@@ -48,7 +46,7 @@ function saveStopped() {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket bridge
+// Native messaging bridge
 // ---------------------------------------------------------------------------
 
 async function identity() {
@@ -63,57 +61,103 @@ async function identity() {
   return { deviceId, name: brand, platform };
 }
 
+// The native messaging host (server/native-host.js), registered by
+// install-host.js. Chrome launches it on connectNative and only lets the
+// extension IDs in its manifest connect.
+const HOST_NAME = "com.github.darrinm.chrome_debug_bridge";
+
+let port = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+const chunks = new Map(); // id -> parts[] for messages the host split up
+
 function connect() {
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  ws = new WebSocket(BRIDGE_URL);
+  if (port) return;
+  clearTimeout(reconnectTimer);
+  let p;
+  try {
+    p = chrome.runtime.connectNative(HOST_NAME);
+  } catch (err) {
+    showHostProblem(String(err && err.message ? err.message : err));
+    scheduleReconnect();
+    return;
+  }
+  port = p;
+  p.onMessage.addListener(onHostMessage);
+  p.onDisconnect.addListener(() => {
+    const reason = chrome.runtime.lastError ? chrome.runtime.lastError.message : "the native host exited";
+    if (port === p) port = null;
+    showHostProblem(reason);
+    scheduleReconnect();
+  });
+  identity().then((id) => send({ event: "hello", version: chrome.runtime.getManifest().version, ...id }));
+}
 
-  ws.onopen = async () => {
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connect, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+}
+
+async function onHostMessage(msg) {
+  if (msg.chunk) {
+    const { id, index, count, data } = msg.chunk;
+    const parts = chunks.get(id) || new Array(count);
+    parts[index] = data;
+    chunks.set(id, parts);
+    if (parts.filter((x) => x !== undefined).length < count) return;
+    chunks.delete(id);
+    msg = JSON.parse(parts.join(""));
+  }
+  if (msg.event === "ready") {
     reconnectDelay = 1000;
-    send({ event: "hello", version: chrome.runtime.getManifest().version, ...(await identity()) });
-  };
-
-  ws.onmessage = async (event) => {
-    let msg;
-    try {
-      msg = JSON.parse(event.data);
-    } catch {
-      return;
-    }
-    if (msg.id === undefined || !msg.method) return;
-    try {
-      const result = await handle(msg.method, msg.params || {});
-      send({ id: msg.id, result: result === undefined ? {} : result });
-    } catch (err) {
-      send({ id: msg.id, error: { message: String(err && err.message ? err.message : err) } });
-    }
-  };
-
-  ws.onclose = () => {
-    ws = null;
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
-  };
-
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
+    clearHostProblem();
+    return;
+  }
+  if (msg.id === undefined || !msg.method) return;
+  try {
+    const result = await handle(msg.method, msg.params || {});
+    send({ id: msg.id, result: result === undefined ? {} : result });
+  } catch (err) {
+    send({ id: msg.id, error: { message: String(err && err.message ? err.message : err) } });
+  }
 }
 
 function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  if (!port) return;
+  try {
+    port.postMessage(obj);
+  } catch {
+    // The port died between the check and the send; onDisconnect reconnects.
+  }
 }
 
-// Keep the service worker alive and the socket connected. An offscreen
-// document (not subject to MV3's ~30s SW idle kill) pings us every 20s, which
-// resets the SW idle timer; WebSocket activity helps too (Chrome 116+), and
-// the alarm is a last-resort reconnect path.
+// A red "!" on the toolbar icon while the native host can't be reached.
+function showHostProblem(reason) {
+  chrome.action.setBadgeBackgroundColor({ color: "#c0392b" }).catch(() => {});
+  chrome.action.setBadgeText({ text: "!" }).catch(() => {});
+  chrome.action.setTitle({
+    title: `Chrome Debug Bridge: can't reach the native host (${reason}). ` +
+      "Run `npm run install-host` in the server folder, then reload the extension.",
+  }).catch(() => {});
+}
+
+function clearHostProblem() {
+  chrome.action.setBadgeText({ text: "" }).catch(() => {});
+  chrome.action.setTitle({ title: "Chrome Debug Bridge" }).catch(() => {});
+}
+
+// Keep the service worker alive and the host connected. An open native
+// messaging port extends the worker's lifetime; an offscreen document (not
+// subject to MV3's ~30s idle kill) also pings every 20s, and the alarm is a
+// last-resort reconnect path.
 async function ensureKeepalive() {
   try {
     if (await chrome.offscreen.hasDocument()) return;
     await chrome.offscreen.createDocument({
       url: "offscreen.html",
       reasons: ["BLOBS"],
-      justification: "Keeps the service worker alive so the bridge WebSocket stays connected.",
+      justification: "Keeps the service worker alive so the native messaging bridge stays connected.",
     });
   } catch {
     // Racing a concurrent createDocument is fine — one of them wins.
