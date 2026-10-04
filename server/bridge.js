@@ -108,7 +108,7 @@ export class Bridge {
     if (all.length === 1) return all[0];
     if (!all.length) {
       throw new Error(
-        "No browser is connected. Make sure Chrome is running with the Better Browser MCP extension loaded, " +
+        "No browser is connected. Make sure Chrome is running with the Browser Driver MCP extension loaded, " +
         "and that the native host is installed (npm run install-host in the server folder)."
       );
     }

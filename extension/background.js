@@ -1,4 +1,4 @@
-// Better Browser MCP — MV3 service worker.
+// Browser Driver MCP — MV3 service worker.
 //
 // Talks to a native messaging host (server/native-host.js), which relays
 // commands from local MCP servers, and executes them against browser tabs
@@ -64,7 +64,7 @@ async function identity() {
 // The native messaging host (server/native-host.js), registered by
 // install-host.js. Chrome launches it on connectNative and only lets the
 // extension IDs in its manifest connect.
-const HOST_NAME = "com.github.darrinm.better_browser_mcp";
+const HOST_NAME = "com.github.darrinm.browser_driver_mcp";
 
 let port = null;
 let reconnectTimer = null;
@@ -137,14 +137,14 @@ function showHostProblem(reason) {
   chrome.action.setBadgeBackgroundColor({ color: "#c0392b" }).catch(() => {});
   chrome.action.setBadgeText({ text: "!" }).catch(() => {});
   chrome.action.setTitle({
-    title: `Better Browser MCP: can't reach the native host (${reason}). ` +
+    title: `Browser Driver MCP: can't reach the native host (${reason}). ` +
       "Run `npm run install-host` in the server folder, then reload the extension.",
   }).catch(() => {});
 }
 
 function clearHostProblem() {
   chrome.action.setBadgeText({ text: "" }).catch(() => {});
-  chrome.action.setTitle({ title: "Better Browser MCP" }).catch(() => {});
+  chrome.action.setTitle({ title: "Browser Driver MCP" }).catch(() => {});
 }
 
 // Keep the service worker alive and the host connected. An open native
@@ -220,7 +220,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   if (!stoppedTabs.delete(tab.id)) return;
   await saveStopped();
   chrome.action.setBadgeText({ tabId: tab.id, text: "" }).catch(() => {});
-  chrome.action.setTitle({ tabId: tab.id, title: "Better Browser MCP" }).catch(() => {});
+  chrome.action.setTitle({ tabId: tab.id, title: "Browser Driver MCP" }).catch(() => {});
 });
 
 // ---------------------------------------------------------------------------

@@ -60,8 +60,8 @@ const browserDirs = (process.platform === "darwin"
 ).filter((d) => fs.existsSync(d));
 
 const dataDir = process.platform === "darwin"
-  ? path.join(home, "Library/Application Support/better-browser-mcp")
-  : path.join(home, ".local/share/better-browser-mcp");
+  ? path.join(home, "Library/Application Support/browser-driver-mcp")
+  : path.join(home, ".local/share/browser-driver-mcp");
 const launcher = path.join(dataDir, "native-host");
 
 // Browsers launch hosts with a minimal PATH, so the launcher names node by
@@ -80,8 +80,8 @@ function findNode() {
 
 // Earlier versions of this project registered under another name; clean
 // those up on install and uninstall alike.
-const LEGACY_HOST_NAMES = ["com.github.darrinm.chrome_debug_bridge"];
-const legacyDataDirs = ["chrome-debug-bridge"].map((name) => path.join(path.dirname(dataDir), name));
+const LEGACY_HOST_NAMES = ["com.github.darrinm.chrome_debug_bridge", "com.github.darrinm.better_browser_mcp"];
+const legacyDataDirs = ["chrome-debug-bridge", "better-browser-mcp"].map((name) => path.join(path.dirname(dataDir), name));
 for (const dir of browserDirs) {
   for (const name of LEGACY_HOST_NAMES) {
     const file = path.join(dir, "NativeMessagingHosts", `${name}.json`);
@@ -122,7 +122,7 @@ fs.writeFileSync(
 
 const manifest = {
   name: HOST_NAME,
-  description: "Better Browser MCP native host",
+  description: "Browser Driver MCP native host",
   path: launcher,
   type: "stdio",
   allowed_origins: [`chrome-extension://${extensionId}/`],
