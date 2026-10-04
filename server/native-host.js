@@ -16,7 +16,7 @@
 import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
-import { ensureSocketDir, onLines, writeLine } from "./transport.js";
+import { ensureSocketDir, onLines, writeLine, VERSION, PROTOCOL } from "./transport.js";
 
 // Chrome rejects host→extension messages over 1 MB, so larger ones are sent
 // in pieces the extension reassembles. Chunks are counted in characters;
@@ -86,8 +86,12 @@ function fromExtension(msg) {
 const dir = ensureSocketDir();
 const socketPath = path.join(dir, `${process.pid}.sock`);
 
+// Tell the extension how many MCP clients are attached, for its setup page.
+const reportClients = () => toExtension({ event: "clients", count: clients.size });
+
 const server = net.createServer((client) => {
   clients.add(client);
+  reportClients();
   if (hello) writeLine(client, hello);
   onLines(client, (msg) => {
     if (msg.id === undefined || !msg.method) return;
@@ -98,6 +102,7 @@ const server = net.createServer((client) => {
   client.on("error", () => {});
   client.on("close", () => {
     clients.delete(client);
+    reportClients();
     for (const [id, route] of pending) if (route.client === client) pending.delete(id);
   });
 });
@@ -105,7 +110,7 @@ const server = net.createServer((client) => {
 server.listen(socketPath, () => {
   fs.chmodSync(socketPath, 0o600);
   log("listening on", socketPath);
-  toExtension({ event: "ready", socket: socketPath });
+  toExtension({ event: "ready", socket: socketPath, version: VERSION, protocol: PROTOCOL });
 });
 
 function shutdown() {

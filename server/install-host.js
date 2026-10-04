@@ -1,146 +1,28 @@
 #!/usr/bin/env node
 // Register the native messaging host with every Chromium-based browser found
-// for this user (macOS and Linux).
+// for this user (macOS and Linux). The MCP server also does this on every
+// start, so running it by hand is only needed to set up ahead of time.
 //
-//   node install-host.js                 install (or refresh)
-//   node install-host.js --uninstall     remove
-//   node install-host.js --extension-id=<id>   allow a different extension ID
-//
-// The host manifest's allowed_origins pins which extension may launch the
-// host. By default the ID is computed from ../extension/manifest.json.
+//   node install-host.js                        install (or repair)
+//   node install-host.js --uninstall            remove
+//   node install-host.js --extension-id=<id>    also allow another extension ID
 
-import crypto from "node:crypto";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { HOST_NAME, EXTENSION_ID } from "./transport.js";
+import { ensureHost, uninstallHost, extensionIds, launcher, SUPPORTED } from "./host-install.js";
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const home = os.homedir();
-const uninstall = process.argv.includes("--uninstall");
-const idFlag = process.argv.find((a) => a.startsWith("--extension-id="));
-
-if (process.platform !== "darwin" && process.platform !== "linux") {
-  console.error("Only macOS and Linux are supported (Windows registers hosts in the registry).");
+if (!SUPPORTED) {
+  console.error("Only macOS and Linux are supported so far (Windows registers hosts in the registry).");
   process.exit(1);
 }
 
-// Chrome derives an extension's ID from the public key in its manifest's
-// "key" field, or, for an unpacked extension without one, from the folder's
-// path: the first 128 bits of SHA-256, written with the letters a-p instead
-// of hex digits. The manifest carries a key so the ID survives moving the
-// folder.
-function toId(bytes) {
-  return crypto
-    .createHash("sha256")
-    .update(bytes)
-    .digest("hex")
-    .slice(0, 32)
-    .replace(/./g, (c) => String.fromCharCode(97 + parseInt(c, 16)));
+if (process.argv.includes("--uninstall")) {
+  const changes = uninstallHost();
+  for (const c of changes) console.log(c);
+  if (!changes.length) console.log("Nothing to remove.");
+} else {
+  const extra = process.argv.filter((a) => a.startsWith("--extension-id=")).map((a) => a.split("=")[1]);
+  const changes = ensureHost({ extraIds: extra });
+  for (const c of changes) console.log(c);
+  if (!changes.length) console.log("Already installed and up to date.");
+  console.log(`launcher:      ${launcher}`);
+  console.log(`extension IDs: ${extensionIds(extra).join(", ")}`);
 }
-
-// In a repo checkout, read the ID from ../extension; an npm install has no
-// extension folder and uses the published ID.
-const extensionDir = path.resolve(here, "../extension");
-const manifestPath = path.join(extensionDir, "manifest.json");
-const manifestKey = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")).key : undefined;
-const extensionId = idFlag
-  ? idFlag.split("=")[1]
-  : manifestKey
-    ? toId(Buffer.from(manifestKey, "base64"))
-    : fs.existsSync(manifestPath)
-      ? toId(extensionDir)
-      : EXTENSION_ID;
-
-const browserDirs = (process.platform === "darwin"
-  ? [
-      "Google/Chrome", "Google/Chrome Beta", "Google/Chrome Dev", "Google/Chrome Canary", "Chromium",
-      "BraveSoftware/Brave-Browser", "Microsoft Edge", "Vivaldi", "Arc/User Data",
-    ].map((d) => path.join(home, "Library/Application Support", d))
-  : [
-      "google-chrome", "google-chrome-beta", "google-chrome-unstable", "chromium",
-      "BraveSoftware/Brave-Browser", "microsoft-edge", "vivaldi",
-    ].map((d) => path.join(home, ".config", d))
-).filter((d) => fs.existsSync(d));
-
-const dataDir = process.platform === "darwin"
-  ? path.join(home, "Library/Application Support/browser-driver-mcp")
-  : path.join(home, ".local/share/browser-driver-mcp");
-const launcher = path.join(dataDir, "native-host");
-
-// Browsers launch hosts with a minimal PATH, so the launcher names node by
-// absolute path. Prefer the first node on PATH (e.g. a stable Homebrew
-// symlink) over process.execPath, which may be a versioned Cellar path.
-function findNode() {
-  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
-    const candidate = path.join(dir, "node");
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {}
-  }
-  return process.execPath;
-}
-
-// Earlier versions of this project registered under another name; clean
-// those up on install and uninstall alike.
-const LEGACY_HOST_NAMES = ["com.github.darrinm.chrome_debug_bridge", "com.github.darrinm.better_browser_mcp"];
-const legacyDataDirs = ["chrome-debug-bridge", "better-browser-mcp"].map((name) => path.join(path.dirname(dataDir), name));
-for (const dir of browserDirs) {
-  for (const name of LEGACY_HOST_NAMES) {
-    const file = path.join(dir, "NativeMessagingHosts", `${name}.json`);
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-      console.log(`removed legacy ${file}`);
-    }
-  }
-}
-for (const dir of legacyDataDirs) {
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-    console.log(`removed legacy ${dir}`);
-  }
-}
-
-if (uninstall) {
-  for (const dir of browserDirs) {
-    const file = path.join(dir, "NativeMessagingHosts", `${HOST_NAME}.json`);
-    if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
-      console.log(`removed ${file}`);
-    }
-  }
-  fs.rmSync(dataDir, { recursive: true, force: true });
-  console.log(`removed ${dataDir}`);
-  process.exit(0);
-}
-
-fs.mkdirSync(dataDir, { recursive: true });
-fs.writeFileSync(
-  launcher,
-  "#!/bin/sh\n" +
-    "# Launched by the browser via native messaging. Generated by install-host.js.\n" +
-    `exec "${findNode()}" "${path.join(here, "native-host.js")}" "$@"\n`,
-  { mode: 0o755 }
-);
-
-const manifest = {
-  name: HOST_NAME,
-  description: "Browser Driver MCP native host",
-  path: launcher,
-  type: "stdio",
-  allowed_origins: [`chrome-extension://${extensionId}/`],
-};
-
-if (!browserDirs.length) console.warn("No Chromium-based browser profile directories found.");
-for (const dir of browserDirs) {
-  const hostsDir = path.join(dir, "NativeMessagingHosts");
-  fs.mkdirSync(hostsDir, { recursive: true });
-  const file = path.join(hostsDir, `${HOST_NAME}.json`);
-  fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-  console.log(`installed ${file}`);
-}
-console.log(`launcher:     ${launcher}`);
-console.log(`extension ID: ${extensionId}`);
-console.log("Reload the extension (chrome://extensions) so it connects to the host.");
