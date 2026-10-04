@@ -23,6 +23,7 @@ const CDP_VERSION = "1.3";
 const MAX_ELEMENTS = 10000;
 const IS_MAC = navigator.userAgent.includes("Mac");
 const GROUP_TITLE = "MCP";
+const GROUP_COLOR = "cyan"; // closest of Chrome's fixed group colors to the electric-blue glow
 
 // Per-tab state: { attached, domain, console: [], network: Map<requestId, entry>,
 // frames: Map<childFrameId, { parent, index }> }
@@ -229,21 +230,31 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 async function getGroup() {
   const { mcpGroupId } = await chrome.storage.session.get("mcpGroupId");
-  if (mcpGroupId === undefined || mcpGroupId === null) return null;
-  let group;
-  try {
-    group = await chrome.tabGroups.get(mcpGroupId);
-  } catch {
-    return null; // Chrome removes a group when its last tab closes
+  let group = null;
+  if (mcpGroupId !== undefined && mcpGroupId !== null) {
+    try {
+      group = await chrome.tabGroups.get(mcpGroupId);
+    } catch {
+      // Chrome removes a group when its last tab closes.
+    }
   }
-  // Retitle a group created under an older name.
-  if (group.title !== GROUP_TITLE) group = await chrome.tabGroups.update(group.id, { title: GROUP_TITLE });
+  // Session storage is lost when the extension is reloaded or reinstalled;
+  // adopt an existing group by title rather than starting a second one.
+  if (!group) {
+    [group = null] = await chrome.tabGroups.query({ title: GROUP_TITLE });
+    if (!group) return null;
+    await chrome.storage.session.set({ mcpGroupId: group.id });
+  }
+  // Restyle a group created under an older name or color.
+  if (group.title !== GROUP_TITLE || group.color !== GROUP_COLOR) {
+    group = await chrome.tabGroups.update(group.id, { title: GROUP_TITLE, color: GROUP_COLOR });
+  }
   return group;
 }
 
 async function createGroup(windowId, tabId) {
   const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId } });
-  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: "orange" });
+  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: GROUP_COLOR });
   await chrome.storage.session.set({ mcpGroupId: groupId });
   return chrome.tabGroups.get(groupId);
 }
