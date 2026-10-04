@@ -78,10 +78,10 @@ npm run install-host      # in server/
 
 This registers the host with every Chromium-based browser it finds (Chrome,
 Chromium, Brave, Edge, Vivaldi, Arc, and Chrome's beta/dev/canary channels) on
-macOS or Linux, allowing only this extension to launch it. The allowed
-extension ID is computed from the `extension/` folder's path, which is how
-Chrome assigns IDs to unpacked extensions; pass `--extension-id=<id>` if yours
-differs. `npm run uninstall-host` removes it.
+macOS or Linux, allowing only this extension to launch it. The manifest
+carries a fixed `key`, so the extension's ID (`epkpbfomlhcfccjlmjnihbllpdhaacaj`)
+is the same wherever the folder lives; pass `--extension-id=<id>` to allow a
+different one. `npm run uninstall-host` removes it.
 
 ### 3. Load the extension
 
