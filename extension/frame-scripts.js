@@ -6,20 +6,27 @@
 // self-contained. Their globals persist per document across calls.
 
 // Walk the frame's composed tree (including open and closed shadow roots),
-// assign stable refs, and return the included elements as a flat list with
-// tree depths. Visible iframes become { childIndex } placeholders, where
-// childIndex is the iframe's index in window.frames.
+// assign stable refs, and return included elements as a flat list with tree
+// depths — the same semantics as Claude in Chrome's read_page:
+//   filter "all" (default): every element worth naming, visible or not
+//   filter "interactive": visible interactive elements in the viewport
+//   focusRef: that element and its subtree (no viewport culling)
+//   query: find mode — visible elements scored against a natural-language
+//          query; each match carries a score, depth is 0
+// Visible iframes become { childIndex } placeholders, where childIndex is the
+// iframe's index in window.frames.
 export function readPageInFrame(opts) {
-  const { filter, viewportOnly, maxDepth, query, focusRef, maxElements } = opts;
+  const { filter, maxDepth, query, focusRef, maxElements } = opts;
   const g = globalThis;
-  if (!g.__dbgRefs) { g.__dbgRefs = new Map(); g.__dbgRefRev = new WeakMap(); g.__dbgRefN = 0; }
+  if (!g.__dbgRefs) { g.__dbgRefs = new Map(); g.__dbgRefRev = new WeakMap(); }
+  if (!g.__dbgRefN) g.__dbgRefN = 0;
   const refs = g.__dbgRefs;
   // Refs hold WeakRefs so they never pin removed DOM nodes; sweep dead ones.
   for (const [k, w] of refs) { if (!w.deref()) refs.delete(k); }
   function refFor(el) {
     const existing = g.__dbgRefRev.get(el);
     if (existing && refs.has(existing)) return existing;
-    const r = "ref" + (++g.__dbgRefN);
+    const r = "ref_" + (++g.__dbgRefN);
     refs.set(r, new WeakRef(el)); g.__dbgRefRev.set(el, r);
     return r;
   }
@@ -60,7 +67,7 @@ export function readPageInFrame(opts) {
     "heading", "navigation", "main", "banner", "contentinfo", "complementary", "form", "region",
     "article", "dialog", "table", "list", "listitem", "group",
   ]);
-  const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION"]);
+  const INTERACTIVE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY", "OPTION", "DETAILS"]);
   const INTERACTIVE_ROLES = new Set([
     "button", "link", "checkbox", "radio", "tab", "menuitem", "menuitemcheckbox", "menuitemradio",
     "combobox", "textbox", "searchbox", "switch", "slider", "option", "spinbutton", "treeitem",
@@ -87,16 +94,16 @@ export function readPageInFrame(opts) {
   function ownText(el) {
     let t = "";
     for (const c of el.childNodes) if (c.nodeType === Node.TEXT_NODE) t += c.textContent;
-    return clean(t, 200);
+    return clean(t, 100);
   }
   function labelFor(el) {
     if (el.id) {
       const root = el.getRootNode();
       const l = root.querySelector && root.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (l) return clean(l.innerText, 100);
+      if (l) return clean(l.innerText || l.textContent, 100);
     }
     const wrap = el.closest("label");
-    return wrap ? clean(wrap.innerText, 100) : "";
+    return wrap ? clean(wrap.innerText || wrap.textContent, 100) : "";
   }
   function nameOf(el, role) {
     const aria = el.getAttribute("aria-label");
@@ -105,34 +112,72 @@ export function readPageInFrame(opts) {
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
       const type = (el.getAttribute("type") || "").toLowerCase();
       if (tag === "INPUT" && ["submit", "button", "reset"].includes(type) && el.value) return clean(el.value, 100);
+      if (tag === "SELECT" && !isSensitive(el)) {
+        const opt = el.options[el.selectedIndex];
+        if (opt) return clean(opt.textContent, 100);
+      }
       return labelFor(el) || clean(el.placeholder, 100) || clean(el.title, 100);
     }
     if (tag === "IMG") return clean(el.alt, 100);
     if (INTERACTIVE_TAGS.has(tag) || role === "heading" || INTERACTIVE_ROLES.has(role)) {
-      return clean(el.innerText, 100) || clean(el.title, 100);
+      return clean(el.innerText || el.textContent, 100) || clean(el.title, 100);
     }
     return ownText(el) || clean(el.title, 100);
   }
 
-  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK"]);
+  // --- find scoring -------------------------------------------------------
+  const STOP = new Set(["the", "a", "an", "to", "for", "of", "on", "in", "with", "containing", "that", "this", "and", "or", "my", "page"]);
+  const ROLE_WORDS = {
+    button: ["button"], btn: ["button"], link: ["link"],
+    search: ["searchbox", "textbox", "combobox"], field: ["textbox", "searchbox", "combobox"],
+    input: ["textbox", "searchbox", "combobox", "checkbox", "radio"], box: ["textbox", "searchbox", "checkbox"],
+    bar: ["textbox", "searchbox", "navigation"], textbox: ["textbox"], textarea: ["textbox"],
+    checkbox: ["checkbox"], radio: ["radio"], toggle: ["switch", "checkbox"], switch: ["switch"],
+    dropdown: ["combobox", "listbox", "menu"], select: ["combobox", "listbox"], menu: ["menu", "menuitem", "combobox"],
+    tab: ["tab"], image: ["image"], icon: ["image", "button"], picture: ["image"], logo: ["image", "link"],
+    heading: ["heading"], title: ["heading"], header: ["heading", "banner"], nav: ["navigation"],
+    navigation: ["navigation"], slider: ["slider"], list: ["list"], item: ["listitem", "option", "menuitem"],
+    dialog: ["dialog"], modal: ["dialog"], form: ["form"], option: ["option"],
+  };
+  const qTokens = query ? query.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && !STOP.has(t)) : [];
+  function score(el, role, name) {
+    const hay = [name, el.getAttribute("placeholder"), el.getAttribute("title"), el.getAttribute("alt"),
+      el.id, el.getAttribute("name"), el.getAttribute("href")]
+      .filter(Boolean).join(" ").toLowerCase();
+    let s = 0, contentHits = 0;
+    for (const t of qTokens) {
+      const words = ROLE_WORDS[t];
+      if (words && words.includes(role)) s += 2;
+      if (new RegExp(`\\b${t}`).test(hay)) { s += 3; contentHits++; }
+      else if (hay.includes(t)) { s += 1; contentHits++; }
+    }
+    if (!contentHits && !(qTokens.length && qTokens.every((t) => ROLE_WORDS[t]))) return 0;
+    if (isInteractive(el)) s += 1;
+    return s;
+  }
+
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "HEAD", "META", "LINK", "TITLE"]);
   const out = [];
   let truncated = false;
+  const needVisible = filter === "interactive" || !!query;
 
   function entryFor(el, depth, role, name) {
-    const e = { depth, role, name, ref: refFor(el) };
+    const e = { depth, role: role === "generic" ? "generic" : role, name, ref: refFor(el) };
     const href = el.getAttribute("href");
     if (href && el.tagName === "A") e.href = href.slice(0, 200);
     const tag = el.tagName;
-    if (tag === "INPUT") e.type = el.type;
+    const type = el.getAttribute("type");
+    if (type) e.type = type;
+    if (el.getAttribute("placeholder")) e.placeholder = clean(el.getAttribute("placeholder"), 100);
     if (tag === "INPUT" || tag === "TEXTAREA") {
-      if (el.placeholder && el.placeholder !== name) e.placeholder = clean(el.placeholder, 100);
-      const sensitive = isSensitive(el);
-      if (el.type !== "checkbox" && el.type !== "radio" && el.value) {
-        e.value = sensitive ? "[value redacted]" : clean(el.value, 120);
+      if (el.type !== "checkbox" && el.type !== "radio" && el.value && el.value !== name) {
+        e.value = isSensitive(el) ? "[value redacted]" : clean(el.value, 120);
       }
     }
     if (tag === "SELECT" && !isSensitive(el)) {
-      e.options = [...el.options].slice(0, 25).map((o) => ({ text: clean(o.textContent, 80), selected: o.selected }));
+      e.options = [...el.options].slice(0, 50).map((o) => ({
+        text: clean(o.textContent, 100), value: o.value, selected: o.selected,
+      }));
     }
     if (el.type === "checkbox" || el.type === "radio") e.checked = el.checked;
     if (el.disabled) e.disabled = true;
@@ -142,29 +187,40 @@ export function readPageInFrame(opts) {
   }
 
   function include(el, role, name, interactive) {
-    if (query) return (interactive || name) && (name + " " + (el.innerText || "")).toLowerCase().includes(query);
     if (filter === "interactive") return interactive;
     return interactive || STRUCTURAL.has(role) || (role === "image" && !!name) || !!name;
   }
 
   function visit(node, depth, isRoot) {
     if (node.tagName === "IFRAME" || node.tagName === "FRAME") {
-      if (!visible(node) || (viewportOnly && !query && !inViewport(node))) return false;
+      // Hidden iframes are never spliced in, so invisible injected content
+      // can't reach the outline.
+      if (!visible(node) || (filter === "interactive" && !focusRef && !inViewport(node))) return false;
       for (let i = 0; i < window.length; i++) {
         if (window[i] === node.contentWindow) {
-          out.push({ depth, childIndex: i, name: clean(node.title || node.name, 100) });
+          out.push({ depth: query ? 0 : depth, childIndex: i, name: clean(node.title || node.name, 100) });
           break;
         }
       }
       return false;
     }
-    if (!visible(node)) return false;
-    if (!isRoot && viewportOnly && !query && !inViewport(node)) return false;
+    if (!isRoot && filter !== "all" && node.getAttribute("aria-hidden") === "true") return false;
+    if (needVisible && !visible(node)) return false;
+    if (!isRoot && filter === "interactive" && !focusRef && !inViewport(node)) return false;
     const interactive = isInteractive(node);
     const role = roleOf(node);
     const name = nameOf(node, role);
+    if (query) {
+      if (!interactive && !name) return false;
+      const sc = score(node, role, name);
+      if (sc <= 0) return false;
+      const e = entryFor(node, 0, role, name);
+      e.score = sc;
+      out.push(e);
+      return false;
+    }
     if (!isRoot && !include(node, role, name, interactive)) return false;
-    out.push(entryFor(node, query ? 0 : depth, role === "generic" ? "text" : role, name));
+    out.push(entryFor(node, depth, role, name));
     return true;
   }
 
@@ -177,7 +233,7 @@ export function readPageInFrame(opts) {
       if (SKIP.has(node.tagName)) continue;
       const included = visit(node, depth, false);
       if (node.tagName === "SELECT" || node.tagName === "IFRAME" || node.tagName === "FRAME") continue;
-      if (getComputedStyle(node).display === "none") continue; // whole subtree is unrendered
+      if (needVisible && getComputedStyle(node).display === "none") continue; // unrendered subtree
       const next = included ? depth + 1 : depth;
       if (next > maxDepth) { truncated = true; continue; }
       const shadow = shadowRootOf(node);
@@ -191,7 +247,8 @@ export function readPageInFrame(opts) {
   if (focusRef) {
     const w = refs.get(focusRef);
     const el = w && w.deref();
-    if (!el || !el.isConnected) return { error: `Ref "${focusRef}" is stale — call read_page without ref to refresh.` };
+    if (!el) return { error: `Element with ref_id '${focusRef}' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.` };
+    if (!el.isConnected) return { error: `Element with ref_id '${focusRef}' no longer exists. It may have been removed from the page. Use read_page without ref_id to get the current page state.` };
     visit(el, 0, true);
     root = el;
     startDepth = 1;
@@ -260,24 +317,27 @@ export function iframeOffsetInFrame(childIndex) {
 // throwing, since executeScript drops exceptions.
 export function setInputInFrame(localRef, value) {
   const w = globalThis.__dbgRefs && globalThis.__dbgRefs.get(localRef);
-  const el = w && w.deref();
+  let el = w && w.deref();
   if (!el || !el.isConnected) return { error: "Stale or unknown ref — call read_page again to refresh refs." };
+  // A <label> stands for its control.
+  if (el.tagName === "LABEL" && el.control) el = el.control;
   el.focus();
   if (el.tagName === "SELECT") {
-    const opt = [...el.options].find((o) => o.value === value) || [...el.options].find((o) => o.textContent.trim() === value);
-    if (!opt) return { error: `No option with value or text "${value}".` };
+    const v = String(value);
+    const opt = [...el.options].find((o) => o.value === v) || [...el.options].find((o) => o.textContent.trim() === v);
+    if (!opt) return { error: `No option with value or text "${v}". Options: ${[...el.options].map((o) => o.textContent.trim()).join(", ")}` };
     el.value = opt.value;
   } else if (el.type === "checkbox" || el.type === "radio") {
-    el.checked = Boolean(value) && value !== "false";
+    el.checked = value === true || value === "true" || value === 1 || value === "1" || value === "on";
   } else if (el.isContentEditable) {
-    el.textContent = value;
+    el.textContent = String(value);
   } else {
     // The isolated world sees the native value setter, bypassing any
     // framework instrumentation on the element, so React's tracker sees a
     // genuine change.
     const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     const setter = Object.getOwnPropertyDescriptor(proto, "value");
-    if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+    if (setter && setter.set) setter.set.call(el, String(value)); else el.value = String(value);
   }
   el.dispatchEvent(new Event("input", { bubbles: true }));
   el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -295,10 +355,13 @@ export function markFileInputInFrame(localRef, token) {
   return { ok: true };
 }
 
-// Visible text of the frame's main content.
+// Visible text of the page, prioritizing article content: a single
+// <article>, else <main>, else the body.
 export function pageTextInFrame() {
+  const articles = document.querySelectorAll("article");
   const main = document.querySelector("main, [role=main]");
-  const el = main && main.innerText.trim().length > 200 ? main : document.body;
+  const pick = (el) => el && (el.innerText || "").trim().length > 200;
+  const el = articles.length === 1 && pick(articles[0]) ? articles[0] : pick(main) ? main : document.body;
   const text = (el ? el.innerText : "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")

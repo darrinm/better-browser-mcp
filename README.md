@@ -1,7 +1,8 @@
 # Chrome Debug Bridge
 
-Drive your own Chrome browser from an AI agent (or any MCP client), the same way
-Claude's browser tools work:
+Drive your own Chrome browser from an AI agent (or any MCP client) with the
+same tools as Claude in Chrome — same names, same parameters, same behavior —
+so prompts and skills written for Claude in Chrome work unchanged.
 
 ```
 Claude Code ──(MCP over stdio)── server/index.js ──(WebSocket, localhost:9333)── Chrome extension ──(chrome.debugger / CDP)── your tabs
@@ -18,20 +19,43 @@ Two pieces:
 
 | Tool | What it does |
 |---|---|
-| `tabs_context`, `new_tab`, `close_tab` | List, open and close tabs |
-| `navigate` | Go to a URL (or `back`) and wait for the load |
+| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp` | The "Claude" tab group: list its tabs (optionally creating it), open a tab in it, close one |
+| `navigate` | Go to a URL, or `back`/`forward`; without a `tabId` it uses the group's first tab |
+| `computer` | `left_click`, `right_click`, `double_click`, `triple_click`, `type`, `key`, `scroll`, `scroll_to`, `hover`, `left_click_drag`, `wait`, `screenshot`, `zoom` |
+| `read_page` | Accessibility-style outline with `ref_N` element refs (`filter`, `depth`, `ref_id`, `max_chars`) |
+| `find` | Elements matching a description like "login button" or "search bar" (up to 20) |
+| `form_input` | Set an input, select, checkbox (boolean) or contenteditable by ref |
+| `get_page_text` | Page text, preferring the article / main content |
+| `javascript_tool` | Run JS in the page with REPL semantics (top-level `await`, last expression returned) |
+| `read_console_messages`, `read_network_requests` | Console and network activity for the current domain |
 | `resize_window` | Resize the tab's window |
-| `screenshot` | Viewport capture as an image (JPEG by default, PNG on request) |
-| `read_page` | Indented outline of the page with element refs |
-| `find` | Elements whose label or text matches a query, anywhere on the page |
-| `get_page_text` | Visible text of the main content |
-| `click`, `hover`, `drag` | Mouse actions on a ref or at coordinates |
-| `type`, `press_key` | Keyboard input; `press_key` takes chords like `cmd+a` |
-| `scroll` | Scroll by pixels, or bring a ref into view |
-| `form_input` | Set an input/select/checkbox value directly |
 | `file_upload` | Attach local files to a file input |
-| `javascript` | Evaluate JS in the page |
-| `read_console`, `read_network` | Buffered console messages and network requests |
+| `upload_image` | Upload a screenshot (by its ID) to a file input or drop it on the page |
+| `gif_creator` | Record actions and export an annotated GIF |
+| `browser_batch` | Run several tool calls in one round trip, stopping at the first error |
+| `list_connected_browsers`, `select_browser`, `switch_browser` | Choose between several connected browsers |
+| `shortcuts_list`, `shortcuts_execute` | Present for compatibility; there's no side panel, so no shortcuts |
+
+Behaviors that match Claude in Chrome:
+
+- Tools only act on tabs in the MCP tab group, which `tabs_context_mcp
+  {createIfEmpty: true}` creates in a new window.
+- Coordinates are viewport CSS pixels; screenshots come back at that size
+  (`scale` shrinks the image, never the coordinate frame), and each one gets an
+  ID that `upload_image` accepts for a few minutes.
+- `key` takes space-separated keys and chords (`"Backspace Backspace"`,
+  `"cmd+a"`, xdotool names like `Return` and `Page_Down`); page-zoom shortcuts
+  are refused in favor of the `zoom` action.
+- `read_page` defaults to `filter: "all"`, including non-visible elements;
+  `"interactive"` lists only visible controls in the viewport.
+- Console and network buffers reset when the tab moves to another domain.
+
+Where it goes further: `read_page`, `find`, clicks and `form_input` reach into
+closed shadow roots and cross-origin iframes (refs inside a frame look like
+`ref_3@f7`), and sensitive form values are redacted.
+
+Differences: `find` matches with a local scoring heuristic instead of a model;
+there's no domain blocklist; shortcuts aren't available.
 
 ## Setup
 
@@ -54,11 +78,14 @@ the order you start things in doesn't matter.
 ### 3. Register with Claude Code
 
 ```sh
-claude mcp add chrome-bridge -- node /ABSOLUTE/PATH/TO/chrome-dbg-ext/server/index.js
+claude mcp add claude-in-chrome -- node /ABSOLUTE/PATH/TO/chrome-dbg-ext/server/index.js
 ```
 
-Then in a Claude Code session: *"use the chrome-bridge tools to open example.com
-and take a screenshot"*.
+Naming the server `claude-in-chrome` makes the full tool names
+(`mcp__claude-in-chrome__computer`, …) identical to Claude in Chrome's too, so
+even skills that refer to tools by full name work. Turn off Claude Code's
+built-in Chrome integration first (`/chrome`) so the two don't collide — or
+pick any other name if you only need the short names to match.
 
 Any other MCP client works the same way — point it at `node server/index.js`
 over stdio. Set `BRIDGE_PORT` to change the WebSocket port (both sides; the
@@ -74,16 +101,9 @@ extension's port is the `BRIDGE_URL` constant in `extension/background.js`).
   again. The indicator lives in a closed shadow root and only honors trusted
   clicks, so page scripts can't press Stop or remove it for good; it's hidden
   while the agent clicks or takes a screenshot.
-- **Site blocklist.** Open the extension's options page (right-click the
-  toolbar icon → Options) and list sites the agent must never touch, one
-  pattern per line. Patterns match hostname + path, `*` is a wildcard, a bare
-  domain (`mybank.com`) covers the whole site and its subdomains, and a path
-  (`github.com/acme`) covers everything under it. Blocked sites can't be opened,
-  navigated to, read, screenshotted or clicked. Administrators can also set
-  `blockedUrlPatterns` through Chrome enterprise policy
-  (`extension/managed_schema.json`).
-- **The extension's own pages are off limits**, so an agent can't open the
-  options page and edit its own blocklist.
+- **The tab group is the boundary.** Your other tabs are never touched.
+- **The extension's own pages are off limits**, since they run with extension
+  privileges.
 
 ## How it works
 
@@ -93,79 +113,64 @@ extension's port is the `BRIDGE_URL` constant in `extension/background.js`).
   attached — that's inherent to the `debugger` API.
 - **Trusted input.** Clicks and keys go through `Input.dispatchMouseEvent` /
   `Input.dispatchKeyEvent`, so they're indistinguishable from real user input
-  (`isTrusted: true`), unlike synthetic DOM events. `type` sends a real
-  keyDown/keyUp per character (US layout; characters with no key, like emoji,
-  fall back to `Input.insertText`), so autocomplete and per-key handlers fire.
+  (`isTrusted: true`). `type` sends a real keyDown/keyUp per character (US
+  layout; characters with no key, like emoji, fall back to `Input.insertText`).
   On macOS, `cmd+a/c/x/v/z` are sent with the matching editing command,
   because the renderer doesn't handle those native shortcuts itself.
 - **Page reading in the isolated world.** `read_page`, `find`, ref clicks and
   `form_input` run via `chrome.scripting.executeScript` in the extension's
   isolated world, in every frame. That world can reach closed shadow roots
   (`chrome.dom.openOrClosedShadowRoot`), and page scripts can't see or tamper
-  with the ref map.
-- **Text outline.** `read_page` returns lines like
-  `button "Sign in" [ref4]`, indented by nesting, which costs far fewer tokens
-  than JSON. By default it lists interactive elements in the viewport;
-  `filter: "all"` adds headings, landmarks and text, `fullPage: true` covers
-  the whole page, `ref` focuses on a subtree, and `maxDepth`/`maxChars` bound
-  the output.
-- **Shadow DOM and iframes.** The walker descends into open and closed shadow
-  roots and splices each visible iframe's content in where the iframe sits,
-  cross-origin ones included. Refs inside a frame look like `ref3@f7`. Child
-  frames are matched to their `<iframe>` elements by index in
-  `window.frames` (comparing windows is allowed across origins), with frame
-  ids from `chrome.webNavigation`. Hidden iframes are skipped, which also keeps
-  invisible injected content out of the outline.
+  with the ref map. Refs are held via `WeakRef`, so removed nodes are never
+  pinned in memory.
+- **iframes.** Each visible iframe's content is spliced in where the iframe
+  sits, cross-origin ones included. Child frames are matched to their
+  `<iframe>` elements by index in `window.frames` (comparing windows is allowed
+  across origins), with frame ids from `chrome.webNavigation`. Hidden iframes
+  are skipped, which keeps invisible injected content out of the outline.
 - **Clicking refs.** A ref is scrolled into view in its own frame, then each
-  parent iframe's content-box offset is added on the way up. Because a scroll
-  inside a cross-origin iframe reaches the parent page asynchronously, the
-  point is re-measured until two readings agree. CDP mouse events hit-test from
-  the top level, so the click lands in the right frame.
-- **Element refs** are held via `WeakRef` (dead ones are swept on each read),
-  so removed nodes are never pinned in memory, and stay stable across reads
-  until the page navigates.
+  parent iframe's offset is added on the way up. A scroll inside a cross-origin
+  iframe reaches the parent page asynchronously, so the point is re-measured
+  until two readings agree. CDP mouse events hit-test from the top level, so
+  the click lands in the right frame.
+- **Screenshots** are clipped to the visual viewport with `clip.scale` set to
+  undo the device pixel ratio, so image pixels equal CSS pixels equal click
+  coordinates. `zoom` captures a region at up to 4x.
 - **Navigation waits for the right load.** `navigate` starts listening before
   it navigates and matches the `load` lifecycle event by `loaderId`, so a fast
   cached load can't be missed and a subframe's load can't end the wait early.
-  Same-document (`#hash`) navigations return immediately; failures like DNS
-  errors are reported.
-- **Drag and drop.** `drag` moves the mouse in steps for pointer-driven drags,
-  and uses `Input.setInterceptDrags` + `Input.dispatchDragEvent` (as Puppeteer
-  does) so HTML5 drag-and-drop works too.
-- **File upload** tags the input in the isolated world, finds it with
-  `DOM.performSearch`, and calls `DOM.setFileInputFiles`.
-- **Sensitive values are redacted.** Password fields, `type=hidden` inputs,
-  and fields with sensitive `autocomplete` values (`cc-number`,
-  `one-time-code`, `new-password`, …) come back as `[value redacted]` from
-  `read_page`, and never leak through name fallbacks. (The `javascript` tool
-  can still read anything — treat it accordingly.)
+- **Drag and drop.** `left_click_drag` moves the mouse in steps for
+  pointer-driven drags, and uses `Input.setInterceptDrags` +
+  `Input.dispatchDragEvent` so HTML5 drag-and-drop works too.
+  `upload_image` and GIF export drop files with `Input.dispatchDragEvent`.
+- **GIFs.** While recording, the server captures a frame after each action;
+  export draws click circles, drag arrows, labels (from `action_summary`), a
+  progress bar and a watermark on an `OffscreenCanvas` in the service worker,
+  encodes with [gifenc](https://github.com/mattdesl/gifenc), and downloads via
+  `chrome.downloads`.
+- **Several browsers.** Each extension reports a persistent device ID; the
+  server routes to the one selected (or the only one). `switch_browser` shows a
+  Connect notification in every connected browser.
 - **Dialogs can't wedge the bridge.** `alert`/`confirm`/`prompt` are
-  auto-dismissed (and `beforeunload` auto-accepted) via
-  `Page.handleJavaScriptDialog`; each one is logged to the console buffer so
-  the agent sees what happened.
-- **Console & network.** CDP events (`Runtime.consoleAPICalled`,
-  `Runtime.exceptionThrown`, `Log.entryAdded`, `Network.*`) are buffered per
-  tab (capped at 2000 entries) and read back with optional regex filters.
-- **Screenshots** use `Page.captureScreenshot` and come back to the MCP client
-  as real image content blocks, so a multimodal model can see the page. JPEG
-  (quality 80) by default to keep token costs down; pass `format: "png"` for
-  lossless captures.
+  auto-dismissed (and `beforeunload` auto-accepted); each is logged to the
+  console buffer.
 - **Service-worker keepalive.** An offscreen document (exempt from MV3's ~30s
-  service-worker idle kill) pings the worker every 20s, keeping the bridge
-  WebSocket connected even when Chrome throttles background work.
+  service-worker idle kill) pings the worker every 20s.
 
 ## Development
 
 `server/cli.js` is a dev harness: it hosts the extension's WebSocket and an
-HTTP control endpoint on port 9334, so you can drive the bridge with curl. Its
-`extension.reload` command reloads the unpacked extension from disk, so you
-don't have to click reload in `chrome://extensions`:
+HTTP control endpoint on port 9334, so you can call extension methods with
+curl. `extension.reload` reloads the unpacked extension from disk:
 
 ```sh
 node server/cli.js &
-curl -s localhost:9334 -d '{"method":"tabs.context"}'
+curl -s localhost:9334 -d '{"method":"group.context","params":{"createIfEmpty":true}}'
 curl -s localhost:9334 -d '{"method":"extension.reload"}'
 ```
+
+Starting the MCP server with `BRIDGE_DEV=1` adds `dev_call` and
+`dev_reload_extension` tools for the same purpose.
 
 ## Caveats
 
