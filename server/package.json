@@ -1,0 +1,17 @@
+{
+  "name": "chrome-debug-bridge-server",
+  "version": "0.1.0",
+  "description": "MCP server that drives Chrome through the Chrome Debug Bridge extension",
+  "type": "module",
+  "bin": {
+    "chrome-debug-bridge": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.24.0"
+  }
+}

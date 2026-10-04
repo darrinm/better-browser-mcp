@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Chrome Debug Bridge",
+  "version": "0.1.0",
+  "description": "Drives this browser via the Chrome DevTools Protocol, controlled by a local MCP server over WebSocket.",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "debugger",
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Chrome Debug Bridge"
+  }
+}
