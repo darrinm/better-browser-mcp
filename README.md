@@ -23,7 +23,7 @@ Three pieces:
 
 | Tool | What it does |
 |---|---|
-| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp` | The "Claude" tab group: list its tabs (optionally creating it), open a tab in it, close one |
+| `tabs_context_mcp`, `tabs_create_mcp`, `tabs_close_mcp` | The "MCP" tab group: list its tabs (optionally creating it), open a tab in it, close one |
 | `navigate` | Go to a URL, or `back`/`forward`; without a `tabId` it uses the group's first tab |
 | `computer` | `left_click`, `right_click`, `double_click`, `triple_click`, `type`, `key`, `scroll`, `scroll_to`, `hover`, `left_click_drag`, `wait`, `screenshot`, `zoom` |
 | `read_page` | Accessibility-style outline with `ref_N` element refs (`filter`, `depth`, `ref_id`, `max_chars`) |
@@ -111,7 +111,7 @@ same browser at once; the host routes each response back to its caller.
 
 ## Staying in control
 
-- **Glow border and Stop button.** Any page being driven gets a pulsing border
+- **Glow border and Stop button.** Any page being driven gets a pulsing blue border
   and a **Stop automation** button. Pressing Stop detaches the debugger and
   refuses further commands on that tab (the agent is told the user stopped it).
   Dismissing Chrome's "is debugging this browser" banner does the same. Click

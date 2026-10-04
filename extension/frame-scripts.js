@@ -379,7 +379,7 @@ export function installIndicator() {
   const root = host.attachShadow({ mode: "closed" });
   root.innerHTML = `<style>
     .glow { position: fixed; inset: 0; pointer-events: none;
-      box-shadow: inset 0 0 0 3px rgba(217,119,87,.9), inset 0 0 28px 6px rgba(217,119,87,.4);
+      box-shadow: inset 0 0 0 3px rgba(0,170,255,.95), inset 0 0 28px 6px rgba(0,170,255,.45);
       animation: pulse 2.4s ease-in-out infinite; }
     @keyframes pulse { 50% { opacity: .55; } }
     button { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);

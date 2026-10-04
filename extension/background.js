@@ -22,7 +22,7 @@ import { encodeGif, decodeImage, toPng } from "./gif.js";
 const CDP_VERSION = "1.3";
 const MAX_ELEMENTS = 10000;
 const IS_MAC = navigator.userAgent.includes("Mac");
-const GROUP_TITLE = "Claude";
+const GROUP_TITLE = "MCP";
 
 // Per-tab state: { attached, domain, console: [], network: Map<requestId, entry>,
 // frames: Map<childFrameId, { parent, index }> }
@@ -224,17 +224,21 @@ chrome.action.onClicked.addListener(async (tab) => {
 });
 
 // ---------------------------------------------------------------------------
-// MCP tab group: the tabs Claude may use, like Claude in Chrome's.
+// MCP tab group: the tabs the agent may use, like Claude in Chrome's.
 // ---------------------------------------------------------------------------
 
 async function getGroup() {
   const { mcpGroupId } = await chrome.storage.session.get("mcpGroupId");
   if (mcpGroupId === undefined || mcpGroupId === null) return null;
+  let group;
   try {
-    return await chrome.tabGroups.get(mcpGroupId);
+    group = await chrome.tabGroups.get(mcpGroupId);
   } catch {
     return null; // Chrome removes a group when its last tab closes
   }
+  // Retitle a group created under an older name.
+  if (group.title !== GROUP_TITLE) group = await chrome.tabGroups.update(group.id, { title: GROUP_TITLE });
+  return group;
 }
 
 async function createGroup(windowId, tabId) {
@@ -458,7 +462,7 @@ const handlers = {
       const win = await chrome.windows.create({ url: "about:blank", focused: true });
       group = await createGroup(win.id, win.tabs[0].id);
     }
-    return { groupId: group ? group.id : null, tabs: await groupTabs(group) };
+    return { groupId: group ? group.id : null, title: group ? group.title : null, tabs: await groupTabs(group) };
   },
 
   async "group.createTab"({ url }) {
