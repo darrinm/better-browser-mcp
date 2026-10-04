@@ -1,0 +1,16 @@
+<!doctype html><link rel="stylesheet" href="style.css">
+<body style="width:1280px;height:800px;padding:48px 64px">
+<div class="brand"><img src="../../extension/icons/icon128.png">Browser Driver MCP</div>
+<h1 style="margin-top:18px">Private, local, and <span class="blue">no open ports</span></h1>
+<p class="sub">Your agent talks to the extension through Chrome native messaging. No servers, no accounts, no analytics.</p>
+<div style="margin-top:110px;display:flex;align-items:center;justify-content:space-between;font-size:22px">
+  <div class="pill">🤖&nbsp; Your MCP client</div><div class="dim" style="font-size:28px">→</div>
+  <div class="pill" style="flex-direction:column;align-items:flex-start;gap:2px">🔒&nbsp; Native host<span style="font-weight:400;font-size:14px;color:#9fb3c8">private Unix socket</span></div><div class="dim" style="font-size:28px">→</div>
+  <div class="pill">🧩&nbsp; Extension</div><div class="dim" style="font-size:28px">→</div>
+  <div class="pill" style="border-color:#59c8e6">🗂️&nbsp; Your “MCP” tabs</div>
+</div>
+<div style="margin-top:110px;display:grid;grid-template-columns:repeat(3,1fr);gap:22px">
+  <div class="pill" style="display:block;font-weight:400;padding:24px 24px;font-size:22px;line-height:1.5"><b>No network listener</b><br><span style="color:#9fb3c8;font-size:17px">Web pages and other computers can’t reach it.</span></div>
+  <div class="pill" style="display:block;font-weight:400;padding:24px 24px;font-size:22px;line-height:1.5"><b>Secrets redacted</b><br><span style="color:#9fb3c8;font-size:17px">Password, card and one-time-code fields are hidden from the agent.</span></div>
+  <div class="pill" style="display:block;font-weight:400;padding:24px 24px;font-size:22px;line-height:1.5"><b>Sees the whole page</b><br><span style="color:#9fb3c8;font-size:17px">Shadow DOM, closed shadow roots and cross-origin iframes.</span></div>
+</div></body>

@@ -1,0 +1,19 @@
+<!doctype html><link rel="stylesheet" href="style.css">
+<body style="width:1280px;height:800px;padding:48px 64px">
+<div class="brand"><img src="../../extension/icons/icon128.png">Browser Driver MCP</div>
+<h1 style="margin-top:18px">Claude in Chrome’s tools, <span class="blue">for any MCP client</span></h1>
+<p class="sub">Same tool names, parameters and behavior — prompts and skills transfer unchanged. Works with Claude Code, Cursor and more.</p>
+<div class="term" style="margin-top:34px;height:520px">
+<div class="dots"><i></i><i></i><i></i></div>
+<div><span class="p">&gt;</span> change the delivery note on order 4512 to “leave at side door” and save</div><br>
+<div><span class="t">● find</span><span class="dim">(query: "delivery instructions field")</span></div>
+<div class="dim">&nbsp;&nbsp;⎿ textbox "Delivery instructions" [ref_14] placeholder="Add a note"</div>
+<div><span class="t">● computer</span><span class="dim">(action: "triple_click", ref: "ref_14")</span></div>
+<div><span class="t">● computer</span><span class="dim">(action: "type", text: "Leave at side door")</span></div>
+<div><span class="t">● read_page</span><span class="dim">(filter: "interactive")</span></div>
+<div class="dim">&nbsp;&nbsp;⎿ button "Save changes" [ref_17]<br>&nbsp;&nbsp;&nbsp;&nbsp;combobox "Delivery date" [ref_15]<br>&nbsp;&nbsp;&nbsp;&nbsp;iframe src="https://pay.example/widget"<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;button "Update card" [ref_3@f12]</div>
+<div><span class="t">● computer</span><span class="dim">(action: "left_click", ref: "ref_17")</span></div>
+<div><span class="t">● computer</span><span class="dim">(action: "screenshot")</span></div>
+<div class="dim">&nbsp;&nbsp;⎿ Successfully captured screenshot (1280x720, jpeg)</div><br>
+<div><span class="ok">Done</span> — the delivery note on order 4512 now reads “Leave at side door”, and the change is saved.</div>
+</div></body>

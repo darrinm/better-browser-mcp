@@ -61,6 +61,22 @@ closed shadow roots and cross-origin iframes (refs inside a frame look like
 Differences: `find` matches with a local scoring heuristic instead of a model;
 there's no domain blocklist; shortcuts aren't available.
 
+## Install
+
+Once the extension is published:
+
+1. Install **Browser Driver MCP** from the Chrome Web Store.
+2. Install the server and register its native host with your browsers:
+
+   ```sh
+   npm install -g browser-driver-mcp
+   browser-driver-mcp install-host
+   ```
+
+3. Add it to your MCP client, e.g. `claude mcp add browser-driver -- browser-driver-mcp`.
+
+To run from a checkout instead, follow the setup below.
+
 ## Setup
 
 ### 1. Install the server
@@ -219,6 +235,17 @@ Starting the MCP server with `BRIDGE_DEV=1` adds `dev_call` and
   Chrome's own native host).
 - Native host registration is automated for macOS and Linux only; Windows
   registers hosts in the registry.
+
+## Publishing
+
+- **Chrome Web Store:** `node scripts/package-extension.mjs` builds
+  `dist/browser-driver-mcp-<version>.zip` with the manifest's `key` removed
+  (the store rejects it). For the item's first upload only, add
+  `--first-upload` to include `key.pem` so the store keeps the extension ID
+  `epkpbfomlhcfccjlmjnihbllpdhaacaj`. Listing text, permission
+  justifications and data-use answers are in `store/listing.md`; images are
+  in `store/images/` (sources in `store/images-src/`).
+- **npm:** `npm publish` from `server/`.
 
 ## License
 
