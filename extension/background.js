@@ -481,15 +481,12 @@ async function withIndicatorHidden(tabId, fn, buttonOnly = false) {
   }
 }
 
-// Glide the on-page agent cursor to (x, y) and wait until it arrives, so a
-// person watching sees where each pointer action lands. Longer moves take
-// longer, up to 450 ms.
-async function glideCursor(tabId, x, y) {
-  const state = tabState(tabId);
-  const from = state.cursor;
-  const ms = from ? Math.round(Math.min(450, 120 + Math.hypot(x - from.x, y - from.y) * 0.5)) : 0;
-  state.cursor = { x, y };
-  await runInFrame(tabId, 0, moveCursor, [x, y, ms]);
+// Move the on-page agent cursor to a point (with the target element's `size`
+// when known) and wait until it arrives, so a person watching sees where each
+// pointer action lands. Moves take 0.3-1.1 s by Fitts' law.
+async function glideCursor(tabId, { x, y, size }) {
+  tabState(tabId).cursor = { x, y };
+  const ms = await runInFrame(tabId, 0, moveCursor, [x, y, { size }]);
   if (ms) await sleep(ms);
 }
 
@@ -646,7 +643,7 @@ const handlers = {
     const mods = parseModifiers(modifiers);
     return withIndicatorHidden(tabId, async () => {
       const p = await resolvePoint(tabId, { ref, x, y });
-      await glideCursor(tabId, p.x, p.y);
+      await glideCursor(tabId, p);
       await mouse(tabId, "mouseMoved", p.x, p.y, { modifiers: mods });
       runInFrame(tabId, 0, pressCursor, [p.x, p.y]);
       for (let i = 1; i <= clickCount; i++) {
@@ -660,7 +657,7 @@ const handlers = {
   async "input.hover"({ tabId, x, y, ref }) {
     await attach(tabId);
     const p = await resolvePoint(tabId, { ref, x, y });
-    await glideCursor(tabId, p.x, p.y);
+    await glideCursor(tabId, p);
     await mouse(tabId, "mouseMoved", p.x, p.y);
     return { x: p.x, y: p.y };
   },
@@ -682,14 +679,15 @@ const handlers = {
       chrome.debugger.onEvent.addListener(onDrag);
       await cdp(tabId, "Input.setInterceptDrags", { enabled: true });
       try {
-        await glideCursor(tabId, a.x, a.y);
+        await glideCursor(tabId, a);
         await mouse(tabId, "mouseMoved", a.x, a.y, { modifiers: mods });
         runInFrame(tabId, 0, pressCursor, [a.x, a.y]);
         await mouse(tabId, "mousePressed", a.x, a.y, { button: "left", clickCount: 1, modifiers: mods });
         const steps = 12;
-        // Animate the cursor over roughly the time the moves below take.
-        tabState(tabId).cursor = b;
-        runInFrame(tabId, 0, moveCursor, [b.x, b.y, steps * 20]);
+        // Move the cursor along the pointer's straight line, over roughly the
+        // time the moves below take.
+        tabState(tabId).cursor = { x: b.x, y: b.y };
+        runInFrame(tabId, 0, moveCursor, [b.x, b.y, { straight: true, ms: steps * 20 }]);
         for (let i = 1; i <= steps; i++) {
           const x = a.x + ((b.x - a.x) * i) / steps;
           const y = a.y + ((b.y - a.y) * i) / steps;
@@ -763,7 +761,7 @@ const handlers = {
     const deltaX = direction === "left" ? -tick : direction === "right" ? tick : 0;
     const deltaY = direction === "up" ? -tick : direction === "down" ? tick : 0;
     if (!deltaX && !deltaY) throw new Error('scroll_direction must be "up", "down", "left" or "right".');
-    await glideCursor(tabId, x, y);
+    await glideCursor(tabId, { x, y });
     await mouse(tabId, "mouseWheel", x, y, { deltaX, deltaY });
     await sleep(150); // let smooth scrolling settle before the next screenshot
     return {};
@@ -1178,5 +1176,5 @@ async function measureRef(tabId, ref) {
     y += off.y;
     f = link.parent;
   }
-  return { x, y };
+  return { x, y, size: p.size };
 }
