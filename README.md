@@ -56,11 +56,8 @@ Behaviors that match Claude in Chrome:
 
 Where it goes further: `read_page`, `find`, clicks and `form_input` reach into
 closed shadow roots and cross-origin iframes (refs inside a frame look like
-`ref_3@f7`), and sensitive form values are redacted. A blue agent cursor
-moves to each click, hover, drag and scroll target before the action happens,
-so you can follow what the agent does. Its motion is a port of Cua Driver's
-"signature arc" style: a curved path, Fitts'-law timing, and a squish and
-ripple on clicks. Screenshots leave it out.
+`ref_3@f7`), sensitive form values are redacted, and an on-page agent cursor
+shows where each pointer action lands (see [Staying in control](#staying-in-control)).
 
 Differences: `find` matches with a local scoring heuristic instead of a model;
 there's no domain blocklist; shortcuts aren't available.
@@ -69,7 +66,9 @@ there's no domain blocklist; shortcuts aren't available.
 
 1. Install **Browser Driver MCP** from the Chrome Web Store. It opens a setup
    page with live status and the exact line for your MCP client (click the
-   toolbar icon to get back to it).
+   toolbar icon to get back to it). The store listing is in review; until it's
+   live, clone this repo and load `extension/` unpacked
+   ([step 3 of Setup](#3-load-the-extension)). Step 2 below works unchanged.
 2. Add the server to your MCP client, e.g. for Claude Code:
 
    ```sh
@@ -139,8 +138,13 @@ same browser at once; the host routes each response back to its caller.
   Dismissing Chrome's "is debugging this browser" banner does the same. Click
   the extension's toolbar icon on a stopped tab to allow automation there
   again. The indicator lives in a closed shadow root and only honors trusted
-  clicks, so page scripts can't press Stop or remove it for good; it's hidden
-  while the agent clicks or takes a screenshot.
+  clicks, so page scripts can't press Stop or remove it for good. The Stop
+  button is hidden while the agent's mouse events are sent, so a click can't
+  land on it, and the whole indicator is hidden while it takes a screenshot.
+- **Agent cursor.** Before each click, hover, drag or scroll, a blue arrow
+  moves to the target, so you can follow what the agent does. Clicks squish
+  the arrow and send out a ripple. The cursor is part of the indicator, so
+  screenshots never show it to the agent.
 - **The tab group is the boundary.** Your other tabs are never touched.
 - **The extension's own pages are off limits**, since they run with extension
   privileges.
@@ -198,6 +202,18 @@ same browser at once; the host routes each response back to its caller.
 - **Drag and drop.** `left_click_drag` moves the mouse in steps for
   pointer-driven drags, and uses `Input.setInterceptDrags` +
   `Input.dispatchDragEvent` so HTML5 drag-and-drop works too.
+- **Agent cursor motion** is a port of Cua Driver's "signature arc" style
+  ([trycua/cua](https://github.com/trycua/cua), MIT; notices in
+  `extension/THIRD_PARTY_NOTICES.md`). The page plans each move as 120 Hz
+  samples along a cubic bezier arc, with up to 8 px of follow-through past
+  the target. The move takes `clamp(150 + 120·log2(D/W + 1), 300, 1000) × 1.1`
+  ms by Fitts' law, where W is the target element's smaller side (24 px when
+  the action gives coordinates). The service worker waits until the tip
+  reaches the target and then sends the input event. A ref target is measured
+  again at that point, and the cursor follows it if it moved. Drags move the
+  cursor in a straight line with the pointer. Hidden tabs skip the wait, and
+  `prefers-reduced-motion` turns each move into a 120 ms straight move with no
+  effects.
   `upload_image` and GIF export drop files with `Input.dispatchDragEvent`.
 - **GIFs.** While recording, the server captures a frame after each action;
   export draws click circles, drag arrows, labels (from `action_summary`), a
