@@ -383,8 +383,7 @@ export function pageTextInFrame() {
 // pixels), so it reappears there after a page load; null leaves it hidden
 // until the first move.
 export function installIndicator(cursor) {
-  const existing = globalThis.__dbgIndicator;
-  if (existing && existing.isConnected) return;
+  if (globalThis.__dbgIndicator?.isConnected) return;
   const host = document.createElement("div");
   host.style.cssText = "all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
   const root = host.attachShadow({ mode: "closed" });
@@ -393,6 +392,7 @@ export function installIndicator(cursor) {
   const SIZE = 42;
   const HOT_X = (55 * SIZE) / 128;
   const HOT_Y = (30 * SIZE) / 128;
+  const GLOW_R = 30 * 1.44; // the speed glow's largest radius; it's scaled down from this
   const halo = [[44, 0.02], [36, 0.024], [29, 0.03], [23, 0.038], [18, 0.048], [14, 0.06], [10, 0.075], [7, 0.095]]
     .map(([w, o]) => `<path d="${ARROW}" fill="none" stroke="#00aaff" stroke-width="${w}" stroke-opacity="${o}" stroke-linejoin="round"/>`)
     .join("");
@@ -408,8 +408,9 @@ export function installIndicator(cursor) {
     button:hover { background: #0090dd; }
     svg.cursor { position: fixed; left: 0; top: 0; overflow: visible; pointer-events: none; opacity: 0;
       transform-origin: ${HOT_X}px ${HOT_Y}px; transition: opacity 150ms ease; }
-    .speed, .ripple { position: fixed; left: 0; top: 0; border-radius: 50%; pointer-events: none; opacity: 0; }
-    .speed { background: radial-gradient(closest-side, rgb(0,170,255), rgba(0,170,255,0)); }
+    .speed, .ripple { position: fixed; left: 0; top: 0; border-radius: 50%; pointer-events: none; }
+    .speed { width: ${2 * GLOW_R}px; height: ${2 * GLOW_R}px; opacity: 0;
+      background: radial-gradient(closest-side, rgb(0,170,255), rgba(0,170,255,0)); }
     .ripple { box-sizing: border-box; border: solid rgb(115,208,255); }
   </style><div class="glow"></div><div class="speed"></div><button type="button">&#9632; Stop automation</button>
   <svg class="cursor" width="${SIZE}" height="${SIZE}" viewBox="0 0 128 128">${halo}
@@ -430,49 +431,50 @@ export function installIndicator(cursor) {
   const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
   const minJerk = (t) => t * t * t * (10 - 15 * t + 6 * t * t);
   const state = {
-    pos: cursor ? { x: cursor.x, y: cursor.y } : null,
+    pos: cursor,
     vel: { x: 0, y: 0 },
     rot: 0,
-    samples: null, // the move in progress
-    start: 0,
+    move: null, // the move in progress: plan()'s result plus its start time
     pressAt: -1,
-    ripples: [],
     frame: 0,
     last: 0,
   };
 
-  // Plan a move from `a` to `b` as samples STEP ms apart. `size` is the
-  // target's smaller side in px, for the Fitts'-law duration. `straight` and
-  // `ms` override the style, for a drag that must follow the real pointer.
-  // Returns the samples and when the tip first reaches the target, which is
-  // when the action should fire; any follow-through plays on during it.
-  function plan(a, b, { size, straight, ms } = {}) {
+  // Plan a move from `a` to `b` as samples `step` ms apart. `size` is the
+  // target's smaller side in px, for the Fitts'-law duration. An explicit
+  // `ms` gives a straight move of that length instead, for a drag that must
+  // follow the real pointer. Returns the samples and when the tip first
+  // reaches the target, which is when the action should fire; any
+  // follow-through plays on during it.
+  function plan(a, b, { size, ms } = {}) {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
     const dist = Math.hypot(dx, dy);
     let point = (f) => ({ x: a.x + dx * f, y: a.y + dy * f });
     let profile = minJerk;
-    if (!straight && !reduced) {
-      // Bow perpendicular to the line; rightward moves bow upward.
+    if (ms === undefined && !reduced) {
+      // Bow perpendicular to the line; rightward moves bow upward. Cua's
+      // arcFlow of 0.15 puts slightly more of the bow near the end.
       const side = dx > 0 ? -1 : 1;
       const px = -dy / dist;
       const py = dx / dist;
       const deflection = dist * 0.16 * side;
-      const flow = (0.15 + 1) / 2;
-      const c1d = deflection * (1 - 0.5 * flow);
-      const c2d = deflection * (1 - 0.5 * (1 - flow));
+      const c1d = deflection * 0.7125;
+      const c2d = deflection * 0.7875;
       const c1 = { x: a.x + dx * 0.3 + px * c1d, y: a.y + dy * 0.3 + py * c1d };
       const c2 = { x: b.x - dx * 0.3 + px * c2d, y: b.y - dy * 0.3 + py * c2d };
-      const bez = (t, k) => {
-        const u = 1 - t;
-        return u * u * u * a[k] + 3 * u * u * t * c1[k] + 3 * u * t * t * c2[k] + t * t * t * b[k];
-      };
       // Arc-length table, so the profile maps to distance along the curve.
       const N = 256;
       const pts = [a];
       const cum = [0];
       for (let i = 1; i <= N; i++) {
-        const p = { x: bez(i / N, "x"), y: bez(i / N, "y") };
+        const t = i / N;
+        const u = 1 - t;
+        const w0 = u * u * u;
+        const w1 = 3 * u * u * t;
+        const w2 = 3 * u * t * t;
+        const w3 = t * t * t;
+        const p = { x: w0 * a.x + w1 * c1.x + w2 * c2.x + w3 * b.x, y: w0 * a.y + w1 * c1.y + w2 * c2.y + w3 * b.y };
         cum.push(cum[i - 1] + Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y));
         pts.push(p);
       }
@@ -500,7 +502,7 @@ export function installIndicator(cursor) {
       const eb = 1.8;
       const peak = (ea / (ea + eb)) ** ea * (eb / (ea + eb)) ** eb;
       profile = (t) => minJerk(t) + (over * t ** ea * (1 - t) ** eb) / peak;
-      ms ??= clamp(150 + 120 * Math.log2(dist / Math.max(4, size || 24) + 1), 300, 1000) * 1.1;
+      ms ??= clamp(150 + 120 * Math.log2(dist / Math.max(4, size ?? 24) + 1), 300, 1000) * 1.1;
     }
     ms ??= 120;
     const n = Math.max(1, Math.round(ms / STEP));
@@ -510,16 +512,20 @@ export function installIndicator(cursor) {
     return { samples, step: ms / n, arriveMs: (arrive < 0 ? n : arrive) * (ms / n) };
   }
 
-  function frame(now) {
+  function frame() {
+    // performance.now(), not the rAF timestamp: that is the frame's vsync
+    // time and can precede the performance.now() that move() and press()
+    // record, which would index samples[-1].
+    const now = performance.now();
     state.frame = 0;
-    const dt = Math.min(0.05, (now - (state.last || now)) / 1000);
+    const dt = Math.min(0.05, (now - state.last) / 1000);
     state.last = now;
     let busy = false;
 
-    if (state.samples) {
-      const { samples, step } = state;
+    if (state.move) {
+      const { samples, step, start } = state.move;
       const end = samples.length - 1;
-      const f = (now - state.start) / step;
+      const f = (now - start) / step;
       const i = Math.min(Math.floor(f), end);
       const k = Math.min(f - i, 1);
       const p = samples[i];
@@ -532,7 +538,7 @@ export function installIndicator(cursor) {
         ? { x: (samples[i1].x - samples[i0].x) / span, y: (samples[i1].y - samples[i0].y) / span }
         : { x: 0, y: 0 };
       if (i >= end) {
-        state.samples = null;
+        state.move = null;
         state.vel = { x: 0, y: 0 };
       }
       busy = true;
@@ -545,7 +551,7 @@ export function installIndicator(cursor) {
     const want = weight ? wrap(Math.atan2(vel.y, vel.x) - TIP) * weight : 0;
     state.rot += wrap(want - state.rot) * (1 - Math.exp(-dt * 22));
     if (Math.abs(state.rot) > 0.002) busy = true;
-    else if (!state.samples) state.rot = 0;
+    else if (!state.move) state.rot = 0;
 
     let squish = 0;
     if (state.pressAt >= 0) {
@@ -567,34 +573,12 @@ export function installIndicator(cursor) {
     else {
       const back = Math.min(speed * 0.009, 18) / speed;
       const r = 30 * (1 + Math.min(speed * 0.00024, 0.44));
-      Object.assign(speedGlow.style, {
-        width: `${2 * r}px`,
-        height: `${2 * r}px`,
-        opacity: alpha,
-        transform: `translate(${pos.x - vel.x * back - r}px, ${pos.y - vel.y * back - r}px)`,
-      });
+      speedGlow.style.opacity = alpha;
+      speedGlow.style.transform =
+        `translate(${pos.x - vel.x * back - GLOW_R}px, ${pos.y - vel.y * back - GLOW_R}px) scale(${r / GLOW_R})`;
     }
 
-    state.ripples = state.ripples.filter((rp) => {
-      const k = (now - rp.start) / 520;
-      if (k >= 1) {
-        rp.el.remove();
-        return false;
-      }
-      const r = 8 + 44 * (1 - (1 - k) ** 3);
-      Object.assign(rp.el.style, {
-        width: `${2 * r}px`,
-        height: `${2 * r}px`,
-        borderWidth: `${4 * (1 - k) + 1}px`,
-        opacity: 0.75 * (1 - k),
-        transform: `translate(${rp.x - r}px, ${rp.y - r}px)`,
-      });
-      return true;
-    });
-    if (state.ripples.length) busy = true;
-
     if (busy) kick();
-    else state.last = 0;
   }
 
   function kick() {
@@ -608,28 +592,36 @@ export function installIndicator(cursor) {
     state.pos = { x, y };
     pointer.style.opacity = 1;
     if (from && Math.hypot(x - from.x, y - from.y) >= 1) {
-      const m = plan(from, state.pos, opts);
-      state.samples = m.samples;
-      state.step = m.step;
-      state.start = performance.now();
+      state.move = { ...plan(from, state.pos, opts), start: performance.now() };
       kick();
-      return m.arriveMs;
+      // A hidden tab runs no animation frames and has no viewer to wait for.
+      return document.hidden ? 0 : state.move.arriveMs;
     }
     kick();
     return 0;
   }
 
+  // Squish the cursor and send a ripple out from (x, y): its radius eases
+  // out from 8px to 52px while its border thins and it fades.
   function press(x, y) {
-    if (reduced) return;
-    const el = document.createElement("div");
+    if (reduced || document.hidden) return;
+    const el = root.appendChild(document.createElement("div"));
     el.className = "ripple";
-    root.appendChild(el);
-    state.ripples.push({ el, x, y, start: performance.now() });
+    el.style.transform = `translate(${x}px, ${y}px)`;
+    el.animate(
+      [{ width: "16px", height: "16px", margin: "-8px" }, { width: "104px", height: "104px", margin: "-52px" }],
+      { duration: 520, easing: "cubic-bezier(.33,1,.68,1)" },
+    );
+    el.animate([{ borderWidth: "5px", opacity: 0.75 }, { borderWidth: "1px", opacity: 0 }], 520).onfinish = () =>
+      el.remove();
     state.pressAt = performance.now();
     kick();
   }
 
-  if (state.pos) move(state.pos.x, state.pos.y);
+  if (cursor) {
+    pointer.style.opacity = 1;
+    kick();
+  }
   document.documentElement.appendChild(host);
   globalThis.__dbgIndicator = host;
   globalThis.__dbgParts = { button, move, press };

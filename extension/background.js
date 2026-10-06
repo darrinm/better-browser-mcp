@@ -483,11 +483,26 @@ async function withIndicatorHidden(tabId, fn, buttonOnly = false) {
 
 // Move the on-page agent cursor to a point (with the target element's `size`
 // when known) and wait until it arrives, so a person watching sees where each
-// pointer action lands. Moves take 0.3-1.1 s by Fitts' law.
-async function glideCursor(tabId, { x, y, size }) {
+// pointer action lands. Moves take 0.3-1.1 s by Fitts' law; `ms` instead
+// makes a straight move of that length, which `wait: false` doesn't wait for.
+async function glideCursor(tabId, { x, y, size }, { ms, wait = true } = {}) {
   tabState(tabId).cursor = { x, y };
-  const ms = await runInFrame(tabId, 0, moveCursor, [x, y, { size }]);
-  if (ms) await sleep(ms);
+  const moving = runInFrame(tabId, 0, moveCursor, [x, y, { size, ms }]);
+  if (!wait) return;
+  const arriveMs = await moving;
+  if (arriveMs) await sleep(arriveMs);
+}
+
+// Resolve a target and glide the cursor to it. The page can move during the
+// glide, so a ref target is measured again afterwards and the cursor follows
+// if it moved.
+async function glideTo(tabId, target, label) {
+  const p = await resolvePoint(tabId, target, label);
+  await glideCursor(tabId, p);
+  if (target.ref == null) return p;
+  const q = await resolvePoint(tabId, target, label);
+  if (Math.hypot(q.x - p.x, q.y - p.y) >= 1) await glideCursor(tabId, q);
+  return q;
 }
 
 // The visual viewport in CSS pixels — the coordinate frame for every click,
@@ -641,9 +656,8 @@ const handlers = {
   async "input.click"({ tabId, x, y, ref, button = "left", clickCount = 1, modifiers }) {
     await attach(tabId);
     const mods = parseModifiers(modifiers);
+    const p = await glideTo(tabId, { ref, x, y });
     return withIndicatorHidden(tabId, async () => {
-      const p = await resolvePoint(tabId, { ref, x, y });
-      await glideCursor(tabId, p);
       await mouse(tabId, "mouseMoved", p.x, p.y, { modifiers: mods });
       runInFrame(tabId, 0, pressCursor, [p.x, p.y]);
       for (let i = 1; i <= clickCount; i++) {
@@ -656,8 +670,7 @@ const handlers = {
 
   async "input.hover"({ tabId, x, y, ref }) {
     await attach(tabId);
-    const p = await resolvePoint(tabId, { ref, x, y });
-    await glideCursor(tabId, p);
+    const p = await glideTo(tabId, { ref, x, y });
     await mouse(tabId, "mouseMoved", p.x, p.y);
     return { x: p.x, y: p.y };
   },
@@ -665,9 +678,10 @@ const handlers = {
   async "input.drag"({ tabId, from, to, modifiers }) {
     await attach(tabId);
     const mods = parseModifiers(modifiers);
+    const a = await resolvePoint(tabId, from || {}, "start_coordinate");
+    const b = await resolvePoint(tabId, to || {}, "coordinate");
+    await glideCursor(tabId, a);
     return withIndicatorHidden(tabId, async () => {
-      const a = await resolvePoint(tabId, from || {}, "start_coordinate");
-      const b = await resolvePoint(tabId, to || {}, "coordinate");
       // HTML5 drag-and-drop doesn't run off synthetic mouse events alone, so
       // intercept the drag Chrome starts and replay it as drag events (the
       // same approach Puppeteer uses). Pointer-based drags (sliders, canvas,
@@ -679,15 +693,13 @@ const handlers = {
       chrome.debugger.onEvent.addListener(onDrag);
       await cdp(tabId, "Input.setInterceptDrags", { enabled: true });
       try {
-        await glideCursor(tabId, a);
         await mouse(tabId, "mouseMoved", a.x, a.y, { modifiers: mods });
         runInFrame(tabId, 0, pressCursor, [a.x, a.y]);
         await mouse(tabId, "mousePressed", a.x, a.y, { button: "left", clickCount: 1, modifiers: mods });
         const steps = 12;
         // Move the cursor along the pointer's straight line, over roughly the
         // time the moves below take.
-        tabState(tabId).cursor = { x: b.x, y: b.y };
-        runInFrame(tabId, 0, moveCursor, [b.x, b.y, { straight: true, ms: steps * 20 }]);
+        glideCursor(tabId, b, { ms: steps * 20, wait: false });
         for (let i = 1; i <= steps; i++) {
           const x = a.x + ((b.x - a.x) * i) / steps;
           const y = a.y + ((b.y - a.y) * i) / steps;
@@ -1016,7 +1028,10 @@ async function handle(method, params) {
         );
       }
       if (isOwnPage(tab.url)) throw new Error(OWN_PAGE_ERROR);
-      if (method !== "window.resize") await runInFrame(tabId, 0, installIndicator, [tabState(tabId).cursor]);
+      // Not awaited: executeScript waits for the page to reach document_idle,
+      // and a hung or slow-loading page must not block commands such as
+      // navigate. Later injections into the frame run after this one.
+      if (method !== "window.resize") runInFrame(tabId, 0, installIndicator, [tabState(tabId).cursor]);
     }
   }
   if (method === "page.navigate" && isOwnPage(params.url)) throw new Error(OWN_PAGE_ERROR);
