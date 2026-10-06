@@ -15,7 +15,7 @@
 import { charKey, parseChord, parseModifiers, macEditingCommands } from "./keys.js";
 import {
   readPageInFrame, locateRefInFrame, iframeOffsetInFrame, setInputInFrame, markFileInputInFrame,
-  pageTextInFrame, installIndicator, setIndicatorVisible, removeIndicator,
+  pageTextInFrame, installIndicator, setIndicatorVisible, removeIndicator, moveCursor, pressCursor,
 } from "./frame-scripts.js";
 import { encodeGif, decodeImage, toPng } from "./gif.js";
 
@@ -26,12 +26,12 @@ const GROUP_TITLE = "MCP";
 const GROUP_COLOR = "cyan"; // closest of Chrome's fixed group colors to the electric-blue glow
 
 // Per-tab state: { attached, domain, console: [], network: Map<requestId, entry>,
-// frames: Map<childFrameId, { parent, index }> }
+// frames: Map<childFrameId, { parent, index }>, cursor: { x, y } | null }
 const tabs = new Map();
 
 function tabState(tabId) {
   if (!tabs.has(tabId)) {
-    tabs.set(tabId, { attached: false, domain: null, console: [], network: new Map(), frames: new Map() });
+    tabs.set(tabId, { attached: false, domain: null, console: [], network: new Map(), frames: new Map(), cursor: null });
   }
   return tabs.get(tabId);
 }
@@ -361,7 +361,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Re-show the indicator after each page load on tabs we're driving.
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === "complete" && tabs.get(tabId)?.attached && !stoppedTabs.has(tabId)) {
-    runInFrame(tabId, 0, installIndicator, []);
+    runInFrame(tabId, 0, installIndicator, [tabs.get(tabId).cursor]);
   }
 });
 
@@ -471,14 +471,26 @@ async function resolvePoint(tabId, { ref, x, y }, label = "coordinate") {
 }
 
 // The indicator's Stop button sits above the page, so hide it while the
-// agent clicks or captures the screen.
-async function withIndicatorHidden(tabId, fn) {
-  await runInFrame(tabId, 0, setIndicatorVisible, [false]);
+// agent clicks. Screen captures hide the whole indicator, cursor included.
+async function withIndicatorHidden(tabId, fn, buttonOnly = false) {
+  await runInFrame(tabId, 0, setIndicatorVisible, [false, buttonOnly]);
   try {
     return await fn();
   } finally {
-    await runInFrame(tabId, 0, setIndicatorVisible, [true]);
+    await runInFrame(tabId, 0, setIndicatorVisible, [true, buttonOnly]);
   }
+}
+
+// Glide the on-page agent cursor to (x, y) and wait until it arrives, so a
+// person watching sees where each pointer action lands. Longer moves take
+// longer, up to 450 ms.
+async function glideCursor(tabId, x, y) {
+  const state = tabState(tabId);
+  const from = state.cursor;
+  const ms = from ? Math.round(Math.min(450, 120 + Math.hypot(x - from.x, y - from.y) * 0.5)) : 0;
+  state.cursor = { x, y };
+  await runInFrame(tabId, 0, moveCursor, [x, y, ms]);
+  if (ms) await sleep(ms);
 }
 
 // The visual viewport in CSS pixels — the coordinate frame for every click,
@@ -634,18 +646,21 @@ const handlers = {
     const mods = parseModifiers(modifiers);
     return withIndicatorHidden(tabId, async () => {
       const p = await resolvePoint(tabId, { ref, x, y });
+      await glideCursor(tabId, p.x, p.y);
       await mouse(tabId, "mouseMoved", p.x, p.y, { modifiers: mods });
+      runInFrame(tabId, 0, pressCursor, [p.x, p.y]);
       for (let i = 1; i <= clickCount; i++) {
         await mouse(tabId, "mousePressed", p.x, p.y, { button, clickCount: i, modifiers: mods });
         await mouse(tabId, "mouseReleased", p.x, p.y, { button, clickCount: i, modifiers: mods });
       }
       return { x: p.x, y: p.y };
-    });
+    }, true);
   },
 
   async "input.hover"({ tabId, x, y, ref }) {
     await attach(tabId);
     const p = await resolvePoint(tabId, { ref, x, y });
+    await glideCursor(tabId, p.x, p.y);
     await mouse(tabId, "mouseMoved", p.x, p.y);
     return { x: p.x, y: p.y };
   },
@@ -667,9 +682,14 @@ const handlers = {
       chrome.debugger.onEvent.addListener(onDrag);
       await cdp(tabId, "Input.setInterceptDrags", { enabled: true });
       try {
+        await glideCursor(tabId, a.x, a.y);
         await mouse(tabId, "mouseMoved", a.x, a.y, { modifiers: mods });
+        runInFrame(tabId, 0, pressCursor, [a.x, a.y]);
         await mouse(tabId, "mousePressed", a.x, a.y, { button: "left", clickCount: 1, modifiers: mods });
         const steps = 12;
+        // Animate the cursor over roughly the time the moves below take.
+        tabState(tabId).cursor = b;
+        runInFrame(tabId, 0, moveCursor, [b.x, b.y, steps * 20]);
         for (let i = 1; i <= steps; i++) {
           const x = a.x + ((b.x - a.x) * i) / steps;
           const y = a.y + ((b.y - a.y) * i) / steps;
@@ -687,7 +707,7 @@ const handlers = {
         await cdp(tabId, "Input.setInterceptDrags", { enabled: false }).catch(() => {});
       }
       return { from: a, to: b };
-    });
+    }, true);
   },
 
   async "input.type"({ tabId, text }) {
@@ -743,6 +763,7 @@ const handlers = {
     const deltaX = direction === "left" ? -tick : direction === "right" ? tick : 0;
     const deltaY = direction === "up" ? -tick : direction === "down" ? tick : 0;
     if (!deltaX && !deltaY) throw new Error('scroll_direction must be "up", "down", "left" or "right".');
+    await glideCursor(tabId, x, y);
     await mouse(tabId, "mouseWheel", x, y, { deltaX, deltaY });
     await sleep(150); // let smooth scrolling settle before the next screenshot
     return {};
@@ -997,7 +1018,7 @@ async function handle(method, params) {
         );
       }
       if (isOwnPage(tab.url)) throw new Error(OWN_PAGE_ERROR);
-      if (method !== "window.resize") runInFrame(tabId, 0, installIndicator, []);
+      if (method !== "window.resize") await runInFrame(tabId, 0, installIndicator, [tabState(tabId).cursor]);
     }
   }
   if (method === "page.navigate" && isOwnPage(params.url)) throw new Error(OWN_PAGE_ERROR);

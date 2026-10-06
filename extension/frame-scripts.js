@@ -369,9 +369,12 @@ export function pageTextInFrame() {
   return { url: location.href, title: document.title, text };
 }
 
-// --- Agent indicator: glow border + Stop button -----------------------------
+// --- Agent indicator: glow border, Stop button, agent cursor ----------------
 
-export function installIndicator() {
+// `cursor` is the agent cursor's last position ({ x, y } in viewport CSS
+// pixels), so it reappears there after a page load; null leaves it hidden
+// until the first move.
+export function installIndicator(cursor) {
   const existing = globalThis.__dbgIndicator;
   if (existing && existing.isConnected) return;
   const host = document.createElement("div");
@@ -387,23 +390,75 @@ export function installIndicator() {
       background: #00aaff; border: 0; border-radius: 999px; padding: 9px 16px;
       box-shadow: 0 2px 10px rgba(0,0,0,.3); cursor: pointer; }
     button:hover { background: #0090dd; }
-  </style><div class="glow"></div><button type="button">&#9632; Stop automation</button>`;
-  root.querySelector("button").addEventListener("click", (e) => {
+    .cursor { position: fixed; left: 0; top: 0; pointer-events: none; opacity: 0;
+      transition-property: transform, opacity; transition-duration: 0ms, 150ms;
+      transition-timing-function: cubic-bezier(.45,0,.2,1), ease;
+      filter: drop-shadow(0 0 6px rgba(0,170,255,.8)) drop-shadow(0 1px 2px rgba(0,0,0,.4)); }
+    .cursor.on { opacity: 1; }
+    .cursor svg { display: block; margin: -2px 0 0 -3px; transform-origin: 3px 2px; transition: transform 90ms ease; }
+    .cursor.press svg { transform: scale(.8); }
+    .ripple { position: fixed; width: 36px; height: 36px; margin: -18px 0 0 -18px; border-radius: 50%;
+      border: 2px solid #00aaff; box-sizing: border-box; pointer-events: none;
+      animation: ripple .45s ease-out forwards; }
+    @keyframes ripple { from { transform: scale(.2); opacity: 1; } to { transform: scale(1); opacity: 0; } }
+  </style><div class="glow"></div><button type="button">&#9632; Stop automation</button>
+  <div class="cursor"><svg width="22" height="26" viewBox="0 0 22 26">
+    <path d="M3 2 L3 21 L8 16.5 L11.5 24 L15 22.5 L11.5 15 L18 15 Z"
+      fill="#00aaff" stroke="#fff" stroke-width="1.8" stroke-linejoin="round"/>
+  </svg></div>`;
+  const button = root.querySelector("button");
+  button.addEventListener("click", (e) => {
     e.stopPropagation();
     // Only a real user click counts; page scripts can't forge isTrusted.
     if (e.isTrusted) chrome.runtime.sendMessage({ stopAutomation: true });
   });
+  const pointer = root.querySelector(".cursor");
+  if (cursor) {
+    pointer.style.transform = `translate(${cursor.x}px, ${cursor.y}px)`;
+    pointer.classList.add("on");
+  }
   document.documentElement.appendChild(host);
   globalThis.__dbgIndicator = host;
+  globalThis.__dbgParts = { root, button, pointer };
 }
 
-export function setIndicatorVisible(visible) {
+// With `buttonOnly`, hide just the Stop button so a click can't land on it,
+// and keep the glow and cursor on screen.
+export function setIndicatorVisible(visible, buttonOnly) {
   const host = globalThis.__dbgIndicator;
-  if (host) host.style.display = visible ? "" : "none";
+  if (!host) return;
+  const el = buttonOnly ? globalThis.__dbgParts.button : host;
+  el.style.display = visible ? "" : "none";
+}
+
+// Move the agent cursor to (x, y) over `ms` milliseconds. Its first move
+// after install places it without animating.
+export function moveCursor(x, y, ms) {
+  const parts = globalThis.__dbgParts;
+  if (!parts || !globalThis.__dbgIndicator.isConnected) return;
+  const { pointer } = parts;
+  pointer.style.transitionDuration = `${pointer.classList.contains("on") ? ms : 0}ms, 150ms`;
+  pointer.style.transform = `translate(${x}px, ${y}px)`;
+  pointer.classList.add("on");
+}
+
+// Shrink the agent cursor briefly and draw a ripple at (x, y).
+export function pressCursor(x, y) {
+  const parts = globalThis.__dbgParts;
+  if (!parts || !globalThis.__dbgIndicator.isConnected) return;
+  const ripple = document.createElement("div");
+  ripple.className = "ripple";
+  ripple.style.left = `${x}px`;
+  ripple.style.top = `${y}px`;
+  ripple.addEventListener("animationend", () => ripple.remove());
+  parts.root.appendChild(ripple);
+  parts.pointer.classList.add("press");
+  setTimeout(() => parts.pointer.classList.remove("press"), 120);
 }
 
 export function removeIndicator() {
   const host = globalThis.__dbgIndicator;
   if (host) host.remove();
   globalThis.__dbgIndicator = null;
+  globalThis.__dbgParts = null;
 }

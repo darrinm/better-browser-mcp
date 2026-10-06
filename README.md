@@ -56,7 +56,9 @@ Behaviors that match Claude in Chrome:
 
 Where it goes further: `read_page`, `find`, clicks and `form_input` reach into
 closed shadow roots and cross-origin iframes (refs inside a frame look like
-`ref_3@f7`), and sensitive form values are redacted.
+`ref_3@f7`), and sensitive form values are redacted. A blue agent cursor
+glides to each click, hover, drag and scroll target and ripples on clicks, so
+you can follow what the agent does. Screenshots leave it out.
 
 Differences: `find` matches with a local scoring heuristic instead of a model;
 there's no domain blocklist; shortcuts aren't available.
