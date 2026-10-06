@@ -377,7 +377,8 @@ export function pageTextInFrame() {
 // Copyright (c) 2026 Victor Vannara). A move follows a cubic bezier arc with a
 // small follow-through past the target and takes a Fitts'-law duration. The
 // arrow turns toward its direction of travel, glows in proportion to its
-// speed, and squishes and ripples when it presses.
+// speed, and squishes and ripples when it presses. The license text is in
+// THIRD_PARTY_NOTICES.md.
 
 // `cursor` is the agent cursor's last position ({ x, y } in viewport CSS
 // pixels), so it reappears there after a page load; null leaves it hidden
