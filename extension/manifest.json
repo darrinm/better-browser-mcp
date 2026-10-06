@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Driver MCP",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Lets your local AI agent drive this browser over MCP, with Claude in Chrome-compatible tools and a Stop button.",
   "minimum_chrome_version": "116",
   "background": {
