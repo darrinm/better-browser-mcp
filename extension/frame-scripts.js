@@ -281,7 +281,7 @@ export function locateRefInFrame(localRef) {
   if (!el || !el.isConnected) return null;
   el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   const r = el.getBoundingClientRect();
-  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, size: Math.min(r.width, r.height) };
 }
 
 // Find the <iframe> whose window is window.frames[childIndex] (searching
@@ -369,14 +369,34 @@ export function pageTextInFrame() {
   return { url: location.href, title: document.title, text };
 }
 
-// --- Agent indicator: glow border + Stop button -----------------------------
+// --- Agent indicator: glow border, Stop button, agent cursor ----------------
+//
+// The cursor's look and motion are a port of Cua Driver's default "signature
+// arc" style (https://github.com/trycua/cua, libs/cua-driver; MIT, Copyright
+// (c) 2025 Cua AI, Inc.; its bezier arc math is derived from trope-cua, MIT,
+// Copyright (c) 2026 Victor Vannara). A move follows a cubic bezier arc with a
+// small follow-through past the target and takes a Fitts'-law duration. The
+// arrow turns toward its direction of travel, glows in proportion to its
+// speed, and squishes and ripples when it presses. The license text is in
+// THIRD_PARTY_NOTICES.md.
 
-export function installIndicator() {
-  const existing = globalThis.__dbgIndicator;
-  if (existing && existing.isConnected) return;
+// `cursor` is the agent cursor's last position ({ x, y } in viewport CSS
+// pixels), so it reappears there after a page load; null leaves it hidden
+// until the first move.
+export function installIndicator(cursor) {
+  if (globalThis.__dbgIndicator?.isConnected) return;
   const host = document.createElement("div");
   host.style.cssText = "all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
   const root = host.attachShadow({ mode: "closed" });
+  // Cua's arrow on a 128-unit canvas, shown 42px wide, tip (hotspot) at (55, 30).
+  const ARROW = "M55 30C48 28 42 33 43 41L64 98C67 106 73 106 77 99L86 79C88 75 91 72 95 70L108 63C115 59 114 53 107 50Z";
+  const SIZE = 42;
+  const HOT_X = (55 * SIZE) / 128;
+  const HOT_Y = (30 * SIZE) / 128;
+  const GLOW_R = 30 * 1.44; // the speed glow's largest radius; it's scaled down from this
+  const halo = [[44, 0.02], [36, 0.024], [29, 0.03], [23, 0.038], [18, 0.048], [14, 0.06], [10, 0.075], [7, 0.095]]
+    .map(([w, o]) => `<path d="${ARROW}" fill="none" stroke="#00aaff" stroke-width="${w}" stroke-opacity="${o}" stroke-linejoin="round"/>`)
+    .join("");
   root.innerHTML = `<style>
     .glow { position: fixed; inset: 0; pointer-events: none;
       box-shadow: inset 0 0 0 3px rgba(0,170,255,.95), inset 0 0 28px 6px rgba(0,170,255,.45);
@@ -387,23 +407,253 @@ export function installIndicator() {
       background: #00aaff; border: 0; border-radius: 999px; padding: 9px 16px;
       box-shadow: 0 2px 10px rgba(0,0,0,.3); cursor: pointer; }
     button:hover { background: #0090dd; }
-  </style><div class="glow"></div><button type="button">&#9632; Stop automation</button>`;
-  root.querySelector("button").addEventListener("click", (e) => {
+    svg.cursor { position: fixed; left: 0; top: 0; overflow: visible; pointer-events: none; opacity: 0;
+      transform-origin: ${HOT_X}px ${HOT_Y}px; transition: opacity 150ms ease; }
+    .speed, .ripple { position: fixed; left: 0; top: 0; border-radius: 50%; pointer-events: none; }
+    .speed { width: ${2 * GLOW_R}px; height: ${2 * GLOW_R}px; opacity: 0;
+      background: radial-gradient(closest-side, rgb(0,170,255), rgba(0,170,255,0)); }
+    .ripple { box-sizing: border-box; border: solid rgb(115,208,255); }
+  </style><div class="glow"></div><div class="speed"></div><button type="button">&#9632; Stop automation</button>
+  <svg class="cursor" width="${SIZE}" height="${SIZE}" viewBox="0 0 128 128">${halo}
+    <path d="${ARROW}" fill="#00aaff" stroke="#fff" stroke-width="5" stroke-linejoin="round"/></svg>`;
+  const button = root.querySelector("button");
+  button.addEventListener("click", (e) => {
     e.stopPropagation();
     // Only a real user click counts; page scripts can't forge isTrusted.
     if (e.isTrusted) chrome.runtime.sendMessage({ stopAutomation: true });
   });
+  const pointer = root.querySelector(".cursor");
+  const speedGlow = root.querySelector(".speed");
+
+  const TIP = -0.75 * Math.PI; // the arrow's tip direction at rest (up-left)
+  const STEP = 1000 / 120; // moves are planned as 120 Hz samples
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+  const minJerk = (t) => t * t * t * (10 - 15 * t + 6 * t * t);
+  const state = {
+    pos: cursor,
+    vel: { x: 0, y: 0 },
+    rot: 0,
+    move: null, // the move in progress: plan()'s result plus its start time
+    pressAt: -1,
+    frame: 0,
+    last: 0,
+  };
+
+  // Plan a move from `a` to `b` as samples `step` ms apart. `size` is the
+  // target's smaller side in px, for the Fitts'-law duration. An explicit
+  // `ms` gives a straight move of that length instead, for a drag that must
+  // follow the real pointer. Returns the samples and when the tip first
+  // reaches the target, which is when the action should fire; any
+  // follow-through plays on during it.
+  function plan(a, b, { size, ms } = {}) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    let point = (f) => ({ x: a.x + dx * f, y: a.y + dy * f });
+    let profile = minJerk;
+    if (ms === undefined && !reduced) {
+      // Bow perpendicular to the line; rightward moves bow upward. Cua's
+      // arcFlow of 0.15 puts slightly more of the bow near the end.
+      const side = dx > 0 ? -1 : 1;
+      const px = -dy / dist;
+      const py = dx / dist;
+      const deflection = dist * 0.16 * side;
+      const c1d = deflection * 0.7125;
+      const c2d = deflection * 0.7875;
+      const c1 = { x: a.x + dx * 0.3 + px * c1d, y: a.y + dy * 0.3 + py * c1d };
+      const c2 = { x: b.x - dx * 0.3 + px * c2d, y: b.y - dy * 0.3 + py * c2d };
+      // Arc-length table, so the profile maps to distance along the curve.
+      const N = 256;
+      const pts = [a];
+      const cum = [0];
+      for (let i = 1; i <= N; i++) {
+        const t = i / N;
+        const u = 1 - t;
+        const w0 = u * u * u;
+        const w1 = 3 * u * u * t;
+        const w2 = 3 * u * t * t;
+        const w3 = t * t * t;
+        const p = { x: w0 * a.x + w1 * c1.x + w2 * c2.x + w3 * b.x, y: w0 * a.y + w1 * c1.y + w2 * c2.y + w3 * b.y };
+        cum.push(cum[i - 1] + Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y));
+        pts.push(p);
+      }
+      const total = cum[N];
+      const endLen = Math.hypot(b.x - c2.x, b.y - c2.y);
+      const tx = (b.x - c2.x) / endLen;
+      const ty = (b.y - c2.y) / endLen;
+      point = (f) => {
+        // Past the end, continue along the end tangent.
+        if (f >= 1) return { x: b.x + tx * (f - 1) * total, y: b.y + ty * (f - 1) * total };
+        const s = Math.max(0, f) * total;
+        let lo = 0;
+        let hi = N;
+        while (hi - lo > 1) {
+          const mid = (lo + hi) >> 1;
+          if (cum[mid] < s) lo = mid;
+          else hi = mid;
+        }
+        const k = (s - cum[lo]) / (cum[hi] - cum[lo] || 1);
+        return { x: pts[lo].x + (pts[hi].x - pts[lo].x) * k, y: pts[lo].y + (pts[hi].y - pts[lo].y) * k };
+      };
+      // Follow through up to 8px past the target, peaking 82% of the way in.
+      const over = Math.min(0.018, 8 / dist);
+      const ea = 8.2;
+      const eb = 1.8;
+      const peak = (ea / (ea + eb)) ** ea * (eb / (ea + eb)) ** eb;
+      profile = (t) => minJerk(t) + (over * t ** ea * (1 - t) ** eb) / peak;
+      ms ??= clamp(150 + 120 * Math.log2(dist / Math.max(4, size ?? 24) + 1), 300, 1000) * 1.1;
+    }
+    ms ??= 120;
+    const n = Math.max(1, Math.round(ms / STEP));
+    const samples = [];
+    for (let i = 0; i <= n; i++) samples.push(point(profile(i / n)));
+    const arrive = samples.findIndex((p) => Math.hypot(p.x - b.x, p.y - b.y) <= 1);
+    return { samples, step: ms / n, arriveMs: (arrive < 0 ? n : arrive) * (ms / n) };
+  }
+
+  function frame() {
+    // performance.now(), not the rAF timestamp: that is the frame's vsync
+    // time and can precede the performance.now() that move() and press()
+    // record, which would index samples[-1].
+    const now = performance.now();
+    state.frame = 0;
+    const dt = Math.min(0.05, (now - state.last) / 1000);
+    state.last = now;
+    let busy = false;
+
+    if (state.move) {
+      const { samples, step, start } = state.move;
+      const end = samples.length - 1;
+      const f = (now - start) / step;
+      const i = Math.min(Math.floor(f), end);
+      const k = Math.min(f - i, 1);
+      const p = samples[i];
+      const q = samples[Math.min(i + 1, end)];
+      state.pos = { x: p.x + (q.x - p.x) * k, y: p.y + (q.y - p.y) * k };
+      const i0 = Math.max(0, i - 2);
+      const i1 = Math.min(end, i + 2);
+      const span = ((i1 - i0) * step) / 1000;
+      state.vel = span
+        ? { x: (samples[i1].x - samples[i0].x) / span, y: (samples[i1].y - samples[i0].y) / span }
+        : { x: 0, y: 0 };
+      if (i >= end) {
+        state.move = null;
+        state.vel = { x: 0, y: 0 };
+      }
+      busy = true;
+    }
+    const { pos, vel } = state;
+    const speed = Math.hypot(vel.x, vel.y);
+
+    // Lead with the tip along the direction of travel; ease back to rest.
+    const weight = reduced ? 0 : clamp((speed - 40) / 260, 0, 1);
+    const want = weight ? wrap(Math.atan2(vel.y, vel.x) - TIP) * weight : 0;
+    state.rot += wrap(want - state.rot) * (1 - Math.exp(-dt * 22));
+    if (Math.abs(state.rot) > 0.002) busy = true;
+    else if (!state.move) state.rot = 0;
+
+    let squish = 0;
+    if (state.pressAt >= 0) {
+      const age = (now - state.pressAt) / 1000;
+      if (age < 0.09) squish = 0.12 * Math.min(age / 0.05, 1);
+      else {
+        const u = Math.min((age - 0.09) / 0.22, 1);
+        squish = 0.12 * Math.max(0, Math.cos(u * 1.5 * Math.PI)) * (1 - u);
+      }
+      if (age > 0.31) state.pressAt = -1;
+      busy = true;
+    }
+    pointer.style.transform =
+      `translate(${pos.x - HOT_X}px, ${pos.y - HOT_Y}px) rotate(${state.rot}rad) scale(${1 - squish})`;
+
+    // A soft glow trails behind the cursor while it moves fast.
+    const alpha = reduced ? 0 : Math.min(speed * 0.00014, 0.42);
+    if (alpha < 0.02) speedGlow.style.opacity = 0;
+    else {
+      const back = Math.min(speed * 0.009, 18) / speed;
+      const r = 30 * (1 + Math.min(speed * 0.00024, 0.44));
+      speedGlow.style.opacity = alpha;
+      speedGlow.style.transform =
+        `translate(${pos.x - vel.x * back - GLOW_R}px, ${pos.y - vel.y * back - GLOW_R}px) scale(${r / GLOW_R})`;
+    }
+
+    if (busy) kick();
+  }
+
+  function kick() {
+    if (!state.frame) state.frame = requestAnimationFrame(frame);
+  }
+
+  // Start a move to (x, y); returns ms until the tip reaches it. The first
+  // move after install places the cursor without animating.
+  function move(x, y, opts) {
+    const from = state.pos;
+    state.pos = { x, y };
+    pointer.style.opacity = 1;
+    if (from && Math.hypot(x - from.x, y - from.y) >= 1) {
+      state.move = { ...plan(from, state.pos, opts), start: performance.now() };
+      kick();
+      // A hidden tab runs no animation frames and has no viewer to wait for.
+      return document.hidden ? 0 : state.move.arriveMs;
+    }
+    kick();
+    return 0;
+  }
+
+  // Squish the cursor and send a ripple out from (x, y): its radius eases
+  // out from 8px to 52px while its border thins and it fades.
+  function press(x, y) {
+    if (reduced || document.hidden) return;
+    const el = root.appendChild(document.createElement("div"));
+    el.className = "ripple";
+    el.style.transform = `translate(${x}px, ${y}px)`;
+    el.animate(
+      [{ width: "16px", height: "16px", margin: "-8px" }, { width: "104px", height: "104px", margin: "-52px" }],
+      { duration: 520, easing: "cubic-bezier(.33,1,.68,1)" },
+    );
+    el.animate([{ borderWidth: "5px", opacity: 0.75 }, { borderWidth: "1px", opacity: 0 }], 520).onfinish = () =>
+      el.remove();
+    state.pressAt = performance.now();
+    kick();
+  }
+
+  if (cursor) {
+    pointer.style.opacity = 1;
+    kick();
+  }
   document.documentElement.appendChild(host);
   globalThis.__dbgIndicator = host;
+  globalThis.__dbgParts = { button, move, press };
 }
 
-export function setIndicatorVisible(visible) {
+// With `buttonOnly`, hide just the Stop button so a click can't land on it,
+// and keep the glow and cursor on screen.
+export function setIndicatorVisible(visible, buttonOnly) {
   const host = globalThis.__dbgIndicator;
-  if (host) host.style.display = visible ? "" : "none";
+  if (!host) return;
+  const el = buttonOnly ? globalThis.__dbgParts.button : host;
+  el.style.display = visible ? "" : "none";
+}
+
+// Start moving the agent cursor to (x, y); returns ms until it arrives. See
+// installIndicator's plan() for `opts`.
+export function moveCursor(x, y, opts) {
+  const parts = globalThis.__dbgParts;
+  if (!parts || !globalThis.__dbgIndicator.isConnected) return 0;
+  return parts.move(x, y, opts);
+}
+
+// Squish the agent cursor and draw a ripple at (x, y).
+export function pressCursor(x, y) {
+  const parts = globalThis.__dbgParts;
+  if (parts && globalThis.__dbgIndicator.isConnected) parts.press(x, y);
 }
 
 export function removeIndicator() {
   const host = globalThis.__dbgIndicator;
   if (host) host.remove();
   globalThis.__dbgIndicator = null;
+  globalThis.__dbgParts = null;
 }
