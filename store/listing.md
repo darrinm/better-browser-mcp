@@ -27,6 +27,7 @@ It offers the same tools as Claude in Chrome, with the same names, parameters an
 YOU STAY IN CONTROL
 • The agent only works in a dedicated "MCP" tab group — your other tabs are never touched.
 • Every page it drives glows electric blue and shows a Stop button. One click detaches it immediately.
+• A blue agent cursor moves to each spot before the agent clicks, hovers, drags or scrolls there, so you can follow what it does.
 • Password, payment and one-time-code fields are redacted from what the agent reads.
 
 PRIVATE AND LOCAL
